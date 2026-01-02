@@ -1,11 +1,9 @@
 pipeline {
     agent any
 
-    tools {
-        git 'Default'
-    }
     options {
         timestamps()
+        skipDefaultCheckout(true)
     }
 
     environment {
@@ -19,13 +17,24 @@ pipeline {
         WIREMOCK_PORT = '9090'
 
         WIREMOCK_JAR = 'C:\\Users\\alcil\\OneDrive\\Escritorio\\Unir\\Ejercicios\\wiremock-standalone-3.13.2.jar'
+        REPO_URL = 'https://github.com/alloci88/CP1.git'
+        REPO_BRANCH = '*/master'
+        GIT_TOOL = 'Default'
     }
 
     stages {
 
         stage('Get Code') {
             steps {
-                checkout scm
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${REPO_BRANCH}"]],
+                    doGenerateSubmoduleConfigurations: false,
+                    extensions: [],
+                    userRemoteConfigs: [[url: "${REPO_URL}"]],
+                    gitTool: "${GIT_TOOL}"
+                ])
+
                 bat 'dir'
                 bat 'whoami'
                 bat 'hostname'
