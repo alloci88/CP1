@@ -6,7 +6,6 @@ pipeline {
     }
 
     environment {
-        // Python SIEMPRE por ruta absoluta al venv (no dependemos de PATH ni del usuario del servicio)
         PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
 
         REPORTS_DIR = 'reports'
@@ -16,7 +15,6 @@ pipeline {
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
-        // Ruta real del jar en mi máquina
         WIREMOCK_JAR = 'C:\\Users\\alcil\\OneDrive\\Escritorio\\Unir\\Ejercicios\\wiremock-standalone-3.13.2.jar'
     }
 
@@ -58,11 +56,15 @@ pipeline {
                         set PYTHONPATH=.
                         set FLASK_APP=app\\api.py
 
-                        REM Arrancar Flask (background)
-                        start /B "%PYTHON_BIN%" -m flask run --port %FLASK_PORT%
+                        REM Limpieza preventiva por si quedó algo colgado de ejecuciones anteriores
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
+
+                        REM Arrancar Flask (background) - IMPORTANTE: start "" para rutas con espacios + sin reload
+                        start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
 
                         REM Arrancar Wiremock (background)
-                        start /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
+                        start "" /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
 
                         REM Espera para que levanten servicios
                         ping -n 10 127.0.0.1 > nul
