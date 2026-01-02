@@ -36,10 +36,10 @@ pipeline {
         stage('Unit') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat """
+                    bat '''
                         set PYTHONPATH=.
                         "%PYTHON_BIN%" -m pytest --junitxml=%UNIT_JUNIT% test\\unit
-                    """
+                    '''
                 }
             }
             post {
@@ -52,7 +52,7 @@ pipeline {
         stage('Rest') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat """
+                    bat '''
                         set PYTHONPATH=.
                         set FLASK_APP=app\\api.py
 
@@ -75,7 +75,7 @@ pipeline {
                         exit /b 1
                         :flask_ok
 
-                        REM Healthcheck Wiremock (__admin debería responder 200)
+                        REM Healthcheck Wiremock (__admin deberia responder 200)
                         for /L %%i in (1,1,10) do (
                             powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%WIREMOCK_PORT%/__admin -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto wm_ok
                             ping -n 2 127.0.0.1 > nul
@@ -89,7 +89,7 @@ pipeline {
                         REM Parar procesos por puerto (NO fallar si ya no existen)
                         for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %FLASK_PORT% ^|^| echo PID %%a already dead)
                         for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %WIREMOCK_PORT% ^|^| echo PID %%a already dead)
-                    """
+                    '''
                 }
             }
             post {
