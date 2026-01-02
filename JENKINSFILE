@@ -56,24 +56,39 @@ pipeline {
                         set PYTHONPATH=.
                         set FLASK_APP=app\\api.py
 
-                        REM Limpieza preventiva por si quedó algo colgado de ejecuciones anteriores
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
+                        REM Limpieza preventiva por si quedó algo colgado
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
 
-                        REM Arrancar Flask (background) - IMPORTANTE: start "" para rutas con espacios + sin reload
+                        REM Arrancar Flask (background) - start "" para rutas con espacios + sin reload
                         start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
 
                         REM Arrancar Wiremock (background)
                         start "" /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
 
-                        REM Espera para que levanten servicios
-                        ping -n 10 127.0.0.1 > nul
+                        REM Healthcheck Flask (hasta 10 intentos)
+                        for /L %%i in (1,1,10) do (
+                            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%FLASK_PORT%/ -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto flask_ok
+                            ping -n 2 127.0.0.1 > nul
+                        )
+                        echo Flask no ha levantado en tiempo razonable
+                        exit /b 1
+                        :flask_ok
+
+                        REM Healthcheck Wiremock (debería responder 200 en __admin)
+                        for /L %%i in (1,1,10) do (
+                            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%WIREMOCK_PORT%/__admin -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto wm_ok
+                            ping -n 2 127.0.0.1 > nul
+                        )
+                        echo Wiremock no ha levantado en tiempo razonable
+                        exit /b 1
+                        :wm_ok
 
                         "%PYTHON_BIN%" -m pytest --junitxml=%REST_JUNIT% test\\rest
 
-                        REM Parar procesos por puerto
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a
+                        REM Parar procesos por puerto (sin romper si ya no existen)
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
+                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
                     """
                 }
             }
