@@ -27,24 +27,24 @@ pipeline {
                 bat 'whoami'
                 bat 'hostname'
                 bat 'echo %WORKSPACE%'
-                bat 'if not exist reports mkdir reports'
-                bat '"%PYTHON_BIN%" --version'
-                bat 'if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)'
+                bat "if not exist %REPORTS_DIR% mkdir %REPORTS_DIR%"
+                bat "\"%PYTHON_BIN%\" --version"
+                bat "if exist \"%WIREMOCK_JAR%\" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)"
             }
         }
 
         stage('Unit') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat '''
+                    bat """
                         set PYTHONPATH=.
                         "%PYTHON_BIN%" -m pytest --junitxml=%UNIT_JUNIT% test\\unit
-                    '''
+                    """
                 }
             }
             post {
                 always {
-                    junit testResults: 'reports\\result-unit.xml', allowEmptyResults: true
+                    junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true
                 }
             }
         }
@@ -52,13 +52,13 @@ pipeline {
         stage('Rest') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat '''
+                    bat """
                         set PYTHONPATH=.
                         set FLASK_APP=app\\api.py
 
-                        REM Limpieza preventiva por si quedo algo colgado
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
+                        REM Limpieza preventiva por si quedo algo colgado (NO fallar si no hay nada)
+                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %FLASK_PORT% ^|^| echo PID %%a already dead)
+                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %WIREMOCK_PORT% ^|^| echo PID %%a already dead)
 
                         REM Arrancar Flask (background) - start "" para rutas con espacios + sin reload
                         start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
@@ -75,7 +75,7 @@ pipeline {
                         exit /b 1
                         :flask_ok
 
-                        REM Healthcheck Wiremock (deberia responder 200 en __admin)
+                        REM Healthcheck Wiremock (__admin debería responder 200)
                         for /L %%i in (1,1,10) do (
                             powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%WIREMOCK_PORT%/__admin -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto wm_ok
                             ping -n 2 127.0.0.1 > nul
@@ -86,15 +86,15 @@ pipeline {
 
                         "%PYTHON_BIN%" -m pytest --junitxml=%REST_JUNIT% test\\rest
 
-                        REM Parar procesos por puerto (sin romper si ya no existen)
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
-                        for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
-                    '''
+                        REM Parar procesos por puerto (NO fallar si ya no existen)
+                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %FLASK_PORT% ^|^| echo PID %%a already dead)
+                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do (taskkill /F /PID %%a 2>nul ^&^& echo Killed PID %%a on %WIREMOCK_PORT% ^|^| echo PID %%a already dead)
+                    """
                 }
             }
             post {
                 always {
-                    junit testResults: 'reports\\result-rest.xml', allowEmptyResults: true
+                    junit testResults: "${REST_JUNIT}", allowEmptyResults: true
                 }
             }
         }
