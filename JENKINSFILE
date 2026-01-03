@@ -1,11 +1,153 @@
+/*
+ * =========================
+ * Funciones auxiliares
+ * =========================
+ * 
+ * Estas funciones encapsulan lógica repetitiva para:
+ *  - Evitar bloques bat gigantes y difíciles de mantener
+ *  - Reducir duplicación
+ *  - Hacer el Jenkinsfile más legible y evaluable
+ *
+ * Todo sigue estando dentro del Jenkinsfile (requisito del enunciado)
+ */
+
+/**
+ * Ejecuta un comando batch con una etiqueta clara en el log de Jenkins
+ */
+def runBat(String label, String script) {
+    bat(label: label, script: script)
+}
+
+/**
+ * Verificaciones iniciales del workspace:
+ *  - Información del entorno
+ *  - Creación del directorio de reports
+ *  - Verificación de Python
+ *  - Verificación del JAR de Wiremock
+ */
+def prepWorkspace() {
+    runBat('Workspace / Tools', """
+        @echo off
+        echo === Workspace info ===
+        dir
+        whoami
+        hostname
+        echo %WORKSPACE%
+
+        if not exist "%REPORTS_DIR%" mkdir "%REPORTS_DIR%"
+
+        echo === Python ===
+        "%PYTHON_BIN%" --version
+
+        echo === Wiremock jar ===
+        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)
+
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Mata procesos que estén escuchando en un puerto concreto.
+ * Es idempotente: si no hay procesos, no falla.
+ */
+def killByPort(String port) {
+    runBat("Stop processes on ${port}", """
+        @echo off
+        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :${port} ^| findstr LISTENING') do (
+            taskkill /F /PID %%a 1>nul 2>nul
+            if errorlevel 1 (echo PID %%a on ${port} already dead) else (echo Killed PID %%a on ${port})
+        )
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Espera a que una URL devuelva HTTP 200.
+ * Se usa como healthcheck antes de lanzar los tests REST.
+ */
+def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
+    runBat(label, """
+        @echo off
+        for /L %%i in (1,1,${maxTries}) do (
+            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '${url}' -TimeoutSec ${timeoutSec}).StatusCode } catch { 0 }" ^
+                | findstr /R "^200$" >nul && exit /b 0
+            ping -n 2 127.0.0.1 >nul
+        )
+        exit /b 1
+    """.stripIndent())
+}
+
+/**
+ * Arranca la aplicación Flask en segundo plano
+ */
+def startFlask() {
+    runBat('Start Flask', """
+        @echo off
+        set PYTHONPATH=.
+        set FLASK_APP=app\\api.py
+        start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Arranca Wiremock en segundo plano
+ */
+def startWiremock() {
+    runBat('Start Wiremock', """
+        @echo off
+        start "" /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Ejecuta los tests unitarios y genera reporte JUnit
+ */
+def runUnitTests() {
+    runBat('Pytest Unit', """
+        @echo off
+        set PYTHONPATH=.
+        "%PYTHON_BIN%" -m pytest --junitxml=%UNIT_JUNIT% test\\unit
+        exit /b %ERRORLEVEL%
+    """.stripIndent())
+}
+
+/**
+ * Ejecuta los tests REST y genera reporte JUnit
+ */
+def runRestTests() {
+    runBat('Pytest Rest', """
+        @echo off
+        set PYTHONPATH=.
+        "%PYTHON_BIN%" -m pytest --junitxml=%REST_JUNIT% test\\rest
+        exit /b %ERRORLEVEL%
+    """.stripIndent())
+}
+
+/*
+ * =========================
+ * Pipeline Declarativo
+ * =========================
+ */
+
 pipeline {
     agent any
 
+    /*
+     * Opciones globales del pipeline
+     * - timestamps: añade marcas de tiempo a los logs
+     * - skipDefaultCheckout: evitamos el checkout implícito
+     *   porque controlamos nosotros el Git explícitamente
+     */
     options {
         timestamps()
         skipDefaultCheckout(true)
     }
 
+    /*
+     * Variables de entorno comunes a todo el pipeline
+     */
     environment {
         PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
 
@@ -16,7 +158,8 @@ pipeline {
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
-        WIREMOCK_JAR = 'C:\\Users\\alcil\\OneDrive\\Escritorio\\Unir\\Ejercicios\\wiremock-standalone-3.13.2.jar'
+        WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
+
         REPO_URL = 'https://github.com/alloci88/CP1.git'
         REPO_BRANCH = '*/master'
         GIT_TOOL = 'Default'
@@ -24,6 +167,13 @@ pipeline {
 
     stages {
 
+        /*
+         * =========================
+         * Stage: Get Code
+         * =========================
+         * - Checkout explícito del repositorio
+         * - Preparación del workspace
+         */
         stage('Get Code') {
             steps {
                 checkout([
@@ -35,23 +185,21 @@ pipeline {
                     gitTool: "${GIT_TOOL}"
                 ])
 
-                bat 'dir'
-                bat 'whoami'
-                bat 'hostname'
-                bat 'echo %WORKSPACE%'
-                bat "if not exist %REPORTS_DIR% mkdir %REPORTS_DIR%"
-                bat "\"%PYTHON_BIN%\" --version"
-                bat "if exist \"%WIREMOCK_JAR%\" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)"
+                prepWorkspace()
             }
         }
 
+        /*
+         * =========================
+         * Stage: Unit
+         * =========================
+         * - Ejecuta tests unitarios
+         * - Si fallan, el stage falla pero el pipeline continúa
+         */
         stage('Unit') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat '''
-                        set PYTHONPATH=.
-                        "%PYTHON_BIN%" -m pytest --junitxml=%UNIT_JUNIT% test\\unit
-                    '''
+                    runUnitTests()
                 }
             }
             post {
@@ -61,69 +209,48 @@ pipeline {
             }
         }
 
+        /*
+         * =========================
+         * Stage: Rest
+         * =========================
+         * - Limpia posibles procesos previos
+         * - Arranca Flask y Wiremock
+         * - Espera a que estén operativos
+         * - Ejecuta tests REST
+         * - Limpia procesos SIEMPRE al final
+         */
         stage('Rest') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    bat '''
-                        set PYTHONPATH=.
-                        set FLASK_APP=app\\api.py
 
-                        REM Limpieza preventiva por si quedo algo colgado (NO fallar si no hay nada)
-                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do (
-                            taskkill /F /PID %%a >nul 2>nul
-                            if errorlevel 1 (echo PID %%a on %FLASK_PORT% already dead) else (echo Killed PID %%a on %FLASK_PORT%)
-                        )
-                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do (
-                            taskkill /F /PID %%a >nul 2>nul
-                            if errorlevel 1 (echo PID %%a on %WIREMOCK_PORT% already dead) else (echo Killed PID %%a on %WIREMOCK_PORT%)
-                        )
+                    // Limpieza preventiva
+                    killByPort(env.FLASK_PORT)
+                    killByPort(env.WIREMOCK_PORT)
 
-                        REM Arrancar Flask (background)
-                        start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
+                    // Arranque de servicios
+                    startFlask()
+                    startWiremock()
 
-                        REM Arrancar Wiremock (background)
-                        start "" /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
+                    // Healthchecks
+                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask')
+                    waitHttp200("http://127.0.0.1:${env.WIREMOCK_PORT}/__admin", 10, 2, 'Healthcheck Wiremock')
 
-                        REM Healthcheck Flask
-                        for /L %%i in (1,1,10) do (
-                            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%FLASK_PORT%/ -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto flask_ok
-                            ping -n 2 127.0.0.1 > nul
-                        )
-                        echo Flask no ha levantado en tiempo razonable
-                        exit /b 1
-                        :flask_ok
-
-                        REM Healthcheck Wiremock
-                        for /L %%i in (1,1,10) do (
-                            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:%WIREMOCK_PORT%/__admin -TimeoutSec 2).StatusCode } catch { 0 }" | findstr /R "^200$" >nul && goto wm_ok
-                            ping -n 2 127.0.0.1 > nul
-                        )
-                        echo Wiremock no ha levantado en tiempo razonable
-                        exit /b 1
-                        :wm_ok
-
-                        "%PYTHON_BIN%" -m pytest --junitxml=%REST_JUNIT% test\\rest
-
-                        REM Parar procesos por puerto (NO fallar si ya no existen)
-                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%FLASK_PORT% ^| findstr LISTENING') do (
-                            taskkill /F /PID %%a >nul 2>nul
-                            if errorlevel 1 (echo PID %%a on %FLASK_PORT% already dead) else (echo Killed PID %%a on %FLASK_PORT%)
-                        )
-                        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :%WIREMOCK_PORT% ^| findstr LISTENING') do (
-                            taskkill /F /PID %%a >nul 2>nul
-                            if errorlevel 1 (echo PID %%a on %WIREMOCK_PORT% already dead) else (echo Killed PID %%a on %WIREMOCK_PORT%)
-                        )
-
-                        exit /b 0
-                    '''
+                    // Tests REST
+                    runRestTests()
                 }
             }
             post {
                 always {
+                    // Limpieza garantizada incluso si fallan tests
+                    script {
+                        killByPort(env.FLASK_PORT)
+                        killByPort(env.WIREMOCK_PORT)
+                    }
                     junit testResults: "${REST_JUNIT}", allowEmptyResults: true
                 }
             }
         }
     }
 }
+
 
