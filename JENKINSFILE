@@ -70,7 +70,7 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
         @echo off
         for /L %%i in (1,1,${maxTries}) do (
             powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '${url}' -TimeoutSec ${timeoutSec}).StatusCode } catch { 0 }" ^
-                | findstr /R "^200$" >nul && exit /b 0
+                | findstr /R "^200\\$" >nul && exit /b 0
             ping -n 2 127.0.0.1 >nul
         )
         exit /b 1
