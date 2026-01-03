@@ -2,7 +2,7 @@
  * =========================
  * Funciones auxiliares
  * =========================
- * 
+ *
  * Estas funciones encapsulan lógica repetitiva para:
  *  - Evitar bloques bat gigantes y difíciles de mantener
  *  - Reducir duplicación
@@ -64,13 +64,17 @@ def killByPort(String port) {
 /**
  * Espera a que una URL devuelva HTTP 200.
  * Se usa como healthcheck antes de lanzar los tests REST.
+ *
+ * NOTA IMPORTANTE (Groovy):
+ * - Dentro de strings GString (""" ... """) el símbolo $ intenta interpolar.
+ * - Para un $ literal (regex fin de línea en findstr), hay que usar \$.
  */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label, """
         @echo off
         for /L %%i in (1,1,${maxTries}) do (
             powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '${url}' -TimeoutSec ${timeoutSec}).StatusCode } catch { 0 }" ^
-                | findstr /R "^200\\$" >nul && exit /b 0
+                | findstr /R "^200\$" >nul && exit /b 0
             ping -n 2 127.0.0.1 >nul
         )
         exit /b 1
