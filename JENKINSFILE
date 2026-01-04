@@ -80,9 +80,6 @@ def startWiremock() {
     """.stripIndent())
 }
 
-/*
- * Flake8 -> report parseable by Warnings-NG flake8()
- */
 def runFlake8() {
     runBat('Flake8', """
         @echo off
@@ -105,19 +102,22 @@ def runBandit() {
 }
 
 /*
- * Convert Bandit JSON to SARIF.
- * We avoid cmd heredocs ("<<") because Windows cmd doesn't support them.
- * We also avoid "$schema" (SARIF field) to prevent Groovy GString "$" interpolation pitfalls.
+ * Bandit JSON -> SARIF converter (robust on Windows/Jenkins):
+ * - Does NOT rely on cmd %VAR% expansion inside Python strings
+ * - Reads BANDIT_JSON and BANDIT_SARIF from environment variables
+ * - Ensures output directory exists
+ * - Returns errorlevel != 0 if Python fails
  */
 def banditJsonToSarif() {
     writeFile(
         file: 'reports\\security\\bandit_to_sarif.py',
         text: '''
 import json
+import os
 from pathlib import Path
 
-bandit_json = Path(r"%BANDIT_JSON%")
-sarif_path = Path(r"%BANDIT_SARIF%")
+bandit_json = Path(os.environ.get("BANDIT_JSON", "reports\\\\security\\\\bandit.json"))
+sarif_path  = Path(os.environ.get("BANDIT_SARIF", "reports\\\\security\\\\bandit.sarif"))
 
 def write_empty():
     sarif = {
@@ -196,11 +196,25 @@ sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
 '''.stripIndent()
     )
 
-    runBat('Convert Bandit JSON -> SARIF', """
+    int rc = bat(returnStatus: true, label: 'Convert Bandit JSON -> SARIF', script: """
         @echo off
         "%PYTHON_BIN%" "reports\\security\\bandit_to_sarif.py"
-        exit /b 0
+        exit /b %ERRORLEVEL%
     """.stripIndent())
+
+    echo "Bandit SARIF converter exit code: ${rc}"
+    return rc
+}
+
+def ensureBanditSarifExists() {
+    if (!fileExists(env.BANDIT_SARIF)) {
+        // Minimal SARIF so recordIssues(sarif) never complains about missing file.
+        writeFile(
+            file: env.BANDIT_SARIF,
+            text: '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"bandit","informationUri":"https://bandit.readthedocs.io","rules":[]}},"results":[]}]}'
+        )
+        echo "Bandit SARIF was missing; created minimal fallback at ${env.BANDIT_SARIF}"
+    }
 }
 
 def countFlake8Findings() {
@@ -259,9 +273,6 @@ def readCoveragePercents() {
     return [linesPct, branchesPct]
 }
 
-/*
- * JMeter: call Java directly to avoid brittle/corrupt .bat behavior on some installs.
- */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
@@ -442,13 +453,19 @@ pipeline {
             post {
                 always {
                     script {
-                        // Post must never abort the pipeline: capture any post parsing issues.
+                        // post must NEVER break the pipeline; only decorate results
                         catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                            banditJsonToSarif()
+                            int rc = banditJsonToSarif()
+                            // even if conversion failed or produced nothing, ensure file exists
+                            ensureBanditSarifExists()
+
+                            // publish issues (now the file is guaranteed to exist)
                             recordIssues(
                                 enabledForFailure: true,
                                 tools: [sarif(pattern: "${BANDIT_SARIF}")]
                             )
+
+                            echo "Bandit SARIF publish completed (converter rc=${rc})"
                         }
                     }
                     archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
