@@ -9,8 +9,29 @@ def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
-def prepWorkspace() {
-    runBat('Workspace / Tools v2', """
+/*
+ * Minimal per-stage prep: only ensure report folders exist.
+ * (Keeps logs clean; verbose info only once in Get Code.)
+ */
+def ensureReportsDirs() {
+    runBat('Ensure reports dirs', """
+        @echo off
+        if not exist "%REPORTS_DIR%" mkdir "%REPORTS_DIR%"
+        if not exist "%REPORTS_UNIT_DIR%" mkdir "%REPORTS_UNIT_DIR%"
+        if not exist "%REPORTS_REST_DIR%" mkdir "%REPORTS_REST_DIR%"
+        if not exist "%REPORTS_STATIC_DIR%" mkdir "%REPORTS_STATIC_DIR%"
+        if not exist "%REPORTS_SECURITY_DIR%" mkdir "%REPORTS_SECURITY_DIR%"
+        if not exist "%REPORTS_COVERAGE_DIR%" mkdir "%REPORTS_COVERAGE_DIR%"
+        if not exist "%REPORTS_PERFORMANCE_DIR%" mkdir "%REPORTS_PERFORMANCE_DIR%"
+        exit /b 0
+    """.stripIndent())
+}
+
+/*
+ * Verbose workspace info only once (Get Code).
+ */
+def prepWorkspaceVerbose() {
+    runBat('Workspace info (verbose)', """
         @echo off
         echo === Workspace info ===
 
@@ -19,34 +40,46 @@ def prepWorkspace() {
         hostname
         echo %WORKSPACE%
 
-        if not exist "%REPORTS_DIR%" mkdir "%REPORTS_DIR%"
-        if not exist "%REPORTS_UNIT_DIR%" mkdir "%REPORTS_UNIT_DIR%"
-        if not exist "%REPORTS_REST_DIR%" mkdir "%REPORTS_REST_DIR%"
-        if not exist "%REPORTS_STATIC_DIR%" mkdir "%REPORTS_STATIC_DIR%"
-        if not exist "%REPORTS_SECURITY_DIR%" mkdir "%REPORTS_SECURITY_DIR%"
-        if not exist "%REPORTS_COVERAGE_DIR%" mkdir "%REPORTS_COVERAGE_DIR%"
-        if not exist "%REPORTS_PERFORMANCE_DIR%" mkdir "%REPORTS_PERFORMANCE_DIR%"
-
         echo === Python ===
         "%PYTHON_BIN%" --version
-
-        echo === Wiremock jar ===
-        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock MISSING & exit /b 1)
-
-        echo === JMeter ===
-        if exist "%JMETER_JAR%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
 
         exit /b 0
     """.stripIndent())
 }
 
+def checkWiremockJar() {
+    runBat('Check Wiremock jar', """
+        @echo off
+        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock MISSING & exit /b 1)
+        exit /b 0
+    """.stripIndent())
+}
+
+def checkJmeterJar() {
+    runBat('Check JMeter', """
+        @echo off
+        if exist "%JMETER_JAR%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
+        exit /b 0
+    """.stripIndent())
+}
+
+/*
+ * Kill ALL processes listening on a port (robust).
+ */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
-        for /F "tokens=5" %%a in ('netstat -ano ^| findstr :${port} ^| findstr LISTENING') do (
-            taskkill /F /PID %%a 1>nul 2>nul
-            if errorlevel 1 (echo PID %%a on ${port} already dead) else (echo Killed PID %%a on ${port})
+        setlocal enabledelayedexpansion
+
+        for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":${port} .*LISTENING"') do (
+            set PID=%%p
+            if not "!PID!"=="" (
+                taskkill /F /PID !PID! 1>nul 2>nul
+                if errorlevel 1 (echo PID !PID! on ${port} already dead) else (echo Killed PID !PID! on ${port})
+            )
         )
+
+        endlocal
         exit /b 0
     """.stripIndent())
 }
@@ -344,9 +377,15 @@ pipeline {
                     extensions: [],
                     userRemoteConfigs: [[url: "${REPO_URL}"]]
                 ])
-                prepWorkspace()
 
-                stash name: 'SRC_STASH', includes: '**/*', useDefaultExcludes: false
+                prepWorkspaceVerbose()
+                ensureReportsDirs()
+
+                // Stash ONLY source (exclude .git and generated outputs)
+                stash name: 'SRC_STASH',
+                      includes: '**/*',
+                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**,**/*.pyc',
+                      useDefaultExcludes: false
             }
         }
 
@@ -355,7 +394,7 @@ pipeline {
                 script {
                     deleteDir()
                     unstash 'SRC_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
 
                     int rc = bat(returnStatus: true, label: 'Pytest Unit + Coverage', script: """
                         @echo off
@@ -382,7 +421,9 @@ pipeline {
                 script {
                     deleteDir()
                     unstash 'SRC_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
+
+                    checkWiremockJar()
 
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
@@ -419,7 +460,7 @@ pipeline {
                 script {
                     deleteDir()
                     unstash 'SRC_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
 
                     runFlake8()
                     int findings = countFlake8Findings().toInteger()
@@ -456,7 +497,7 @@ pipeline {
                 script {
                     deleteDir()
                     unstash 'SRC_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
 
                     runBandit()
                     int findings = countBanditFindings().toInteger()
@@ -501,7 +542,9 @@ pipeline {
                 script {
                     deleteDir()
                     unstash 'SRC_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
+
+                    checkJmeterJar()
 
                     killByPort(env.FLASK_PORT)
                     startFlask()
@@ -515,11 +558,16 @@ pipeline {
             post {
                 always {
                     script { killByPort(env.FLASK_PORT) }
+
+                    // IMPORTANT:
+                    // errorFailedThreshold/errorUnstableThreshold = 0 makes ">= 0" trip always.
+                    // Set to sensible non-zero values.
                     perfReport(
                         sourceDataFiles: "${JMETER_JTL}",
-                        errorFailedThreshold: 0,
-                        errorUnstableThreshold: 0
+                        errorUnstableThreshold: 1,
+                        errorFailedThreshold: 5
                     )
+
                     archiveArtifacts artifacts: "${JMETER_JTL}", fingerprint: true, allowEmptyArchive: true
                 }
             }
@@ -531,7 +579,7 @@ pipeline {
                     deleteDir()
                     unstash 'SRC_STASH'
                     unstash 'REPORTS_STASH'
-                    prepWorkspace()
+                    ensureReportsDirs()
 
                     def (double linesPct, double branchesPct) = readCoveragePercents()
                     echo "Coverage lines: ${linesPct}%"
@@ -558,17 +606,16 @@ pipeline {
                     }
                 }
             }
-           post {
-    always {
-        recordCoverage(
-            enabledForFailure: true,
-            tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
-            sourceCodeRetention: 'EVERY_BUILD'
-        )
+            post {
+                always {
+                    recordCoverage(
+                        tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+                        sourceCodeRetention: 'EVERY_BUILD'
+                    )
 
-        archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
-    }
-}
+                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
+                }
+            }
         }
     }
 
