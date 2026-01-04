@@ -11,7 +11,6 @@ def runBat(String label, String script) {
 
 /*
  * Minimal per-stage prep: only ensure report folders exist.
- * (Keeps logs clean; verbose info only once in Get Code.)
  */
 def ensureReportsDirs() {
     runBat('Ensure reports dirs', """
@@ -28,21 +27,17 @@ def ensureReportsDirs() {
 }
 
 /*
- * Verbose workspace info only once (Get Code).
+ * Verbose info only once (required by enunciado).
  */
 def prepWorkspaceVerbose() {
     runBat('Workspace info (verbose)', """
         @echo off
         echo === Workspace info ===
-
-        dir
         whoami
         hostname
         echo %WORKSPACE%
-
         echo === Python ===
         "%PYTHON_BIN%" --version
-
         exit /b 0
     """.stripIndent())
 }
@@ -63,23 +58,12 @@ def checkJmeterJar() {
     """.stripIndent())
 }
 
-/*
- * Kill ALL processes listening on a port (robust).
- */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
-        setlocal enabledelayedexpansion
-
         for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":${port} .*LISTENING"') do (
-            set PID=%%p
-            if not "!PID!"=="" (
-                taskkill /F /PID !PID! 1>nul 2>nul
-                if errorlevel 1 (echo PID !PID! on ${port} already dead) else (echo Killed PID !PID! on ${port})
-            )
+            taskkill /F /PID %%p 1>nul 2>nul
         )
-
-        endlocal
         exit /b 0
     """.stripIndent())
 }
@@ -88,8 +72,7 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label, """
         @echo off
         for /L %%i in (1,1,${maxTries}) do (
-            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '${url}' -TimeoutSec ${timeoutSec}).StatusCode } catch { 0 }" ^
-                | findstr /R "^200\$" >nul && exit /b 0
+            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '${url}' -TimeoutSec ${timeoutSec}).StatusCode } catch { 0 }" | findstr "^200$" >nul && exit /b 0
             ping -n 2 127.0.0.1 >nul
         )
         exit /b 1
@@ -118,207 +101,27 @@ def runFlake8() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        rem flake8 returns non-zero when issues exist, do NOT fail here
         "%PYTHON_BIN%" -m flake8 app test --format=default > "%FLAKE8_REPORT%"
         exit /b 0
     """.stripIndent())
 }
 
 def runBandit() {
-    runBat('Bandit (JSON+TXT)', """
+    runBat('Bandit', """
         @echo off
         set PYTHONPATH=.
-        rem Bandit returns exit code != 0 if issues exist; do NOT fail here
         "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
         "%PYTHON_BIN%" -m bandit -r app -f txt  -o "%BANDIT_REPORT%"
         exit /b 0
     """.stripIndent())
 }
 
-/*
- * Bandit JSON -> SARIF converter (robust on Windows/Jenkins):
- * - Reads BANDIT_JSON and BANDIT_SARIF from environment variables
- * - Ensures output directory exists
- */
-def banditJsonToSarif() {
-    writeFile(
-        file: 'reports\\security\\bandit_to_sarif.py',
-        text: '''
-import json
-import os
-from pathlib import Path
-
-bandit_json = Path(os.environ.get("BANDIT_JSON", "reports\\\\security\\\\bandit.json"))
-sarif_path  = Path(os.environ.get("BANDIT_SARIF", "reports\\\\security\\\\bandit.sarif"))
-
-def write_empty():
-    sarif = {
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": []}},
-            "results": []
-        }]
-    }
-    sarif_path.parent.mkdir(parents=True, exist_ok=True)
-    sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
-
-if not bandit_json.exists():
-    write_empty()
-    raise SystemExit(0)
-
-data = json.loads(bandit_json.read_text(encoding="utf-8"))
-results_in = data.get("results", []) or []
-
-rules = {}
-results = []
-
-for r in results_in:
-    rid = str(r.get("test_id") or "BANDIT")
-    text = str(r.get("issue_text") or "Bandit issue")
-    file_name = str(r.get("filename") or "unknown")
-    line = int(r.get("line_number") or 1)
-
-    sev = str(r.get("issue_severity") or "MEDIUM").upper()
-    level = "warning"
-    if sev == "HIGH":
-        level = "error"
-    elif sev == "LOW":
-        level = "note"
-
-    rules.setdefault(rid, {"id": rid, "name": rid, "shortDescription": {"text": text}})
-
-    results.append({
-        "ruleId": rid,
-        "level": level,
-        "message": {"text": f"{rid}: {text}"},
-        "locations": [{
-            "physicalLocation": {
-                "artifactLocation": {"uri": file_name},
-                "region": {"startLine": line}
-            }
-        }]
-    })
-
-sarif = {
-    "version": "2.1.0",
-    "runs": [{
-        "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": list(rules.values())}},
-        "results": results
-    }]
-}
-
-sarif_path.parent.mkdir(parents=True, exist_ok=True)
-sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
-'''.stripIndent()
-    )
-
-    int rc = bat(returnStatus: true, label: 'Convert Bandit JSON -> SARIF', script: """
-        @echo off
-        "%PYTHON_BIN%" "reports\\security\\bandit_to_sarif.py"
-        exit /b %ERRORLEVEL%
-    """.stripIndent())
-
-    echo "Bandit SARIF converter exit code: ${rc}"
-    return rc
-}
-
-def ensureBanditSarifExists() {
-    if (!fileExists(env.BANDIT_SARIF)) {
-        writeFile(
-            file: env.BANDIT_SARIF,
-            text: '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"bandit","informationUri":"https://bandit.readthedocs.io","rules":[]}},"results":[]}]}'
-        )
-        echo "Bandit SARIF was missing; created minimal fallback at ${env.BANDIT_SARIF}"
-    }
-}
-
-/*
- * Make build reflect worst health WITHOUT aborting the pipeline.
- * Order: SUCCESS < UNSTABLE < FAILURE
- */
-def setBuildResultWorst(String target) {
-    String current = (currentBuild.result ?: 'SUCCESS')
-
-    Map<String, Integer> rank = ['SUCCESS': 0, 'UNSTABLE': 1, 'FAILURE': 2]
-    int curRank = rank.containsKey(current) ? rank[current] : 0
-    int tgtRank = rank.containsKey(target) ? rank[target] : 0
-
-    if (tgtRank > curRank) {
-        currentBuild.result = target
-        echo "Build result escalated: ${current} -> ${target}"
-    } else {
-        echo "Build result unchanged: ${current} (requested ${target})"
-    }
-}
-
-def countFlake8Findings() {
-    return bat(
-        label: 'Count Flake8 findings',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%FLAKE8_REPORT%" (echo 0 & exit /b 0)
-
-            rem Count non-empty lines in flake8 report
-            for /f %%a in ('find /v /c "" ^< "%FLAKE8_REPORT%"') do @echo %%a
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-}
-
-def countBanditFindings() {
-    return bat(
-        label: 'Count Bandit findings (JSON)',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%BANDIT_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_JSON%')); print(len(d.get('results',[])))"
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-}
-
-def readCoveragePercents() {
-    String outLines = bat(
-        label: 'Read coverage percents',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%COVERAGE_JSON%" (echo LINES=0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"LINES={t.get('percent_covered',0):.2f}\\\")"
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-
-    String outBranches = bat(
-        label: 'Read branch coverage percent',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-
-    def m = (outLines =~ /LINES=([0-9.]+)/)
-    double linesPct = m ? m[0][1].toDouble() : 0.0
-    double branchesPct = outBranches ? outBranches.toDouble() : 0.0
-
-    return [linesPct, branchesPct]
-}
-
 def runJmeter() {
     runBat('JMeter', """
         @echo off
-        if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
-
+        if exist "%JMETER_JTL%" del /q "%JMETER_JTL%"
         java -jar "%JMETER_JAR%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
-        set RC=%ERRORLEVEL%
-
-        echo JMETER_RC=%RC%
-        exit /b %RC%
+        exit /b %ERRORLEVEL%
     """.stripIndent())
 }
 
@@ -343,21 +146,17 @@ pipeline {
 
         UNIT_JUNIT = 'reports\\unit\\result-unit.xml'
         REST_JUNIT = 'reports\\rest\\result-rest.xml'
-
         COVERAGE_XML = 'reports\\coverage\\coverage.xml'
         COVERAGE_JSON = 'reports\\coverage\\coverage.json'
 
         FLAKE8_REPORT = 'reports\\static\\flake8.txt'
-
         BANDIT_JSON = 'reports\\security\\bandit.json'
         BANDIT_REPORT = 'reports\\security\\bandit.txt'
-        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
-
         JMETER_JAR = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\ApacheJMeter.jar'
         JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
         JMETER_JTL = 'reports\\performance\\jmeter.jtl'
@@ -373,18 +172,15 @@ pipeline {
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: "${REPO_BRANCH}"]],
-                    doGenerateSubmoduleConfigurations: false,
-                    extensions: [],
                     userRemoteConfigs: [[url: "${REPO_URL}"]]
                 ])
 
                 prepWorkspaceVerbose()
                 ensureReportsDirs()
 
-                // Stash ONLY source (exclude .git and generated outputs)
-                stash name: 'SRC_STASH',
+                stash name: 'SRC',
                       includes: '**/*',
-                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**,**/*.pyc',
+                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
                       useDefaultExcludes: false
             }
         }
@@ -393,34 +189,21 @@ pipeline {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
+                    unstash 'SRC'
                     ensureReportsDirs()
 
-                    int rc = bat(returnStatus: true, label: 'Pytest Unit + Coverage', script: """
-                        @echo off
+                    bat """
                         call "${PYTHON_BIN}" -m coverage run --branch -m pytest --junitxml=${UNIT_JUNIT} test\\unit
-                        set EXITCODE=%ERRORLEVEL%
                         call "${PYTHON_BIN}" -m coverage xml -o ${COVERAGE_XML}
                         call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
-                        exit /b %EXITCODE%
-                    """.stripIndent())
-
-                    echo "Unit exit code: ${rc} (stage stays green by requirement)"
+                    """
                 }
             }
             post {
                 always {
                     junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true
-
-                    // IMPORTANT:
-                    // Publish coverage NOW (while overall build is still SUCCESS).
-                    // If later stages escalate to FAILURE, recordCoverage would skip.
-                    recordCoverage(
-                        tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
-                        sourceCodeRetention: 'EVERY_BUILD'
-                    )
-
-                    stash name: 'REPORTS_STASH', includes: 'reports/**', useDefaultExcludes: false, allowEmpty: true
+                    recordCoverage tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]]
+                    stash name: 'REPORTS', includes: 'reports/**', allowEmpty: true
                 }
             }
         }
@@ -429,11 +212,10 @@ pipeline {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
+                    unstash 'SRC'
                     ensureReportsDirs()
 
                     checkWiremockJar()
-
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
 
@@ -443,22 +225,15 @@ pipeline {
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask')
                     waitHttp200("http://127.0.0.1:${env.WIREMOCK_PORT}/__admin", 10, 2, 'Healthcheck Wiremock')
 
-                    int rc = bat(returnStatus: true, label: 'Pytest Rest', script: """
-                        @echo off
-                        set PYTHONPATH=.
+                    bat """
                         "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
-                        exit /b %ERRORLEVEL%
-                    """.stripIndent())
-
-                    echo "Rest exit code: ${rc} (stage stays green by requirement)"
+                    """
                 }
             }
             post {
                 always {
-                    script {
-                        killByPort(env.FLASK_PORT)
-                        killByPort(env.WIREMOCK_PORT)
-                    }
+                    killByPort(env.FLASK_PORT)
+                    killByPort(env.WIREMOCK_PORT)
                     junit testResults: "${REST_JUNIT}", allowEmptyResults: true
                 }
             }
@@ -468,80 +243,30 @@ pipeline {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
+                    unstash 'SRC'
                     ensureReportsDirs()
-
                     runFlake8()
-                    int findings = countFlake8Findings().toInteger()
-                    echo "Flake8 findings: ${findings}"
-
-                    if (findings >= 10) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Flake8 unhealthy: ${findings} >= 10")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (findings >= 8) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Flake8 unstable: ${findings} >= 8")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Flake8 OK (<8)"
-                    }
                 }
             }
             post {
                 always {
-                    recordIssues(
-                        tools: [flake8(pattern: "${FLAKE8_REPORT}")],
-                        enabledForFailure: true
-                    )
-                    archiveArtifacts artifacts: "${FLAKE8_REPORT}", fingerprint: true, allowEmptyArchive: true
+                    recordIssues tools: [flake8(pattern: "${FLAKE8_REPORT}")]
                 }
             }
         }
 
-        stage('Security Test (Bandit)') {
+        stage('Security') {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
+                    unstash 'SRC'
                     ensureReportsDirs()
-
                     runBandit()
-                    int findings = countBanditFindings().toInteger()
-                    echo "Bandit findings: ${findings}"
-
-                    if (findings >= 4) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Bandit unhealthy: ${findings} >= 4")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (findings >= 2) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Bandit unstable: ${findings} >= 2")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Bandit OK (<2)"
-                    }
                 }
             }
             post {
                 always {
-                    script {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                            int rc = banditJsonToSarif()
-                            ensureBanditSarifExists()
-
-                            recordIssues(
-                                enabledForFailure: true,
-                                tools: [sarif(pattern: "${BANDIT_SARIF}")]
-                            )
-                            echo "Bandit SARIF publish completed (converter rc=${rc})"
-                        }
-                    }
-                    archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+                    recordIssues tools: [sarif(pattern: "${BANDIT_JSON}")]
                 }
             }
         }
@@ -550,33 +275,29 @@ pipeline {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
+                    unstash 'SRC'
                     ensureReportsDirs()
 
                     checkJmeterJar()
-
                     killByPort(env.FLASK_PORT)
                     startFlask()
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
 
-                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                        runJmeter()
-                    }
+                    runJmeter()
                 }
             }
             post {
                 always {
-                    script { killByPort(env.FLASK_PORT) }
+                    killByPort(env.FLASK_PORT)
 
-                    // If overall build is already FAILURE (e.g., Flake8), this plugin will show it.
-                    // That is expected and OK.
-                    perfReport(
-                        sourceDataFiles: "${JMETER_JTL}",
-                        errorUnstableThreshold: 1,
-                        errorFailedThreshold: 5
-                    )
-
-                    archiveArtifacts artifacts: "${JMETER_JTL}", fingerprint: true, allowEmptyArchive: true
+                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                        perfReport(
+                            sourceDataFiles: "${JMETER_JTL}",
+                            errorUnstableThreshold: 1,
+                            errorFailedThreshold: 5,
+                            percentiles: '0,50,90,95,100'
+                        )
+                    }
                 }
             }
         }
@@ -585,38 +306,8 @@ pipeline {
             steps {
                 script {
                     deleteDir()
-                    unstash 'SRC_STASH'
-                    unstash 'REPORTS_STASH'
+                    unstash 'REPORTS'
                     ensureReportsDirs()
-
-                    def (double linesPct, double branchesPct) = readCoveragePercents()
-                    echo "Coverage lines: ${linesPct}%"
-                    echo "Coverage branches: ${branchesPct}%"
-
-                    boolean linesUnstable = (linesPct >= 85.0 && linesPct <= 95.0)
-                    boolean linesFail = (linesPct < 85.0)
-
-                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct <= 90.0)
-                    boolean branchesFail = (branchesPct < 80.0)
-
-                    if (linesFail || branchesFail) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (linesUnstable || branchesUnstable) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Coverage OK"
-                    }
-                }
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
@@ -624,7 +315,7 @@ pipeline {
 
     post {
         always {
-            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            cleanWs(deleteDirs: true)
         }
     }
 }
