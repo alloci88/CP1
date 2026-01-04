@@ -411,6 +411,15 @@ pipeline {
             post {
                 always {
                     junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true
+
+                    // IMPORTANT:
+                    // Publish coverage NOW (while overall build is still SUCCESS).
+                    // If later stages escalate to FAILURE, recordCoverage would skip.
+                    recordCoverage(
+                        tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+                        sourceCodeRetention: 'EVERY_BUILD'
+                    )
+
                     stash name: 'REPORTS_STASH', includes: 'reports/**', useDefaultExcludes: false, allowEmpty: true
                 }
             }
@@ -559,8 +568,8 @@ pipeline {
                 always {
                     script { killByPort(env.FLASK_PORT) }
 
-                    // perfReport will keep showing "Build status is: FAILURE" if the overall build
-                    // already got escalated earlier (e.g., Flake8). That's expected.
+                    // If overall build is already FAILURE (e.g., Flake8), this plugin will show it.
+                    // That is expected and OK.
                     perfReport(
                         sourceDataFiles: "${JMETER_JTL}",
                         errorUnstableThreshold: 1,
@@ -607,26 +616,6 @@ pipeline {
             }
             post {
                 always {
-                    script {
-                        // recordCoverage() skips when overall build is FAILURE.
-                        // Mask temporarily so we still publish coverage, then restore.
-                        String savedResult = (currentBuild.result ?: 'SUCCESS')
-                        try {
-                            if (savedResult == 'FAILURE') {
-                                currentBuild.result = 'SUCCESS'
-                                echo "Temporarily masking build result FAILURE -> SUCCESS to allow recordCoverage()"
-                            }
-
-                            recordCoverage(
-                                tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
-                                sourceCodeRetention: 'EVERY_BUILD'
-                            )
-                        } finally {
-                            currentBuild.result = savedResult
-                            echo "Restored build result to ${savedResult}"
-                        }
-                    }
-
                     archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
