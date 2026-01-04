@@ -94,16 +94,16 @@ def runFlake8() {
 }
 
 /**
- * Bandit -> JSON 
- * - Genera JSON para contabilizar findings
- * - Devolvemos 0 para no cortar la pipeline en este punto
+ * Bandit -> SARIF (for Warnings-NG sarif())
+ * - Generate SARIF to publish issues without Groovy parser config
+ * - Return 0 so we can apply our own quality gate based on count
  */
-def runBandit() {
-    runBat('Bandit (JSON)', """
+def runBanditSarif() {
+    runBat('Bandit (SARIF)', """
         @echo off
         set PYTHONPATH=.
-        rem Bandit devuelve exit code != 0 si hay issues, NO queremos cortar aqui
-        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
+        rem Bandit may return non-zero when issues exist, do NOT fail here
+        "%PYTHON_BIN%" -m bandit -r app -f sarif -o "%BANDIT_SARIF%"
         exit /b 0
     """.stripIndent())
 }
@@ -122,16 +122,16 @@ def countFlake8Findings() {
 }
 
 /**
- * Bandit JSON: cuenta len(results)
+ * Bandit SARIF: count number of results (runs[].results)
  */
-def countBanditFindings() {
+def countBanditFindingsSarif() {
     return bat(
-        label: 'Count Bandit findings (JSON)',
+        label: 'Count Bandit findings (SARIF)',
         returnStdout: true,
         script: """
             @echo off
-            if not exist "%BANDIT_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_JSON%')); print(len(d.get('results',[])))"
+            if not exist "%BANDIT_SARIF%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_SARIF%')); runs=d.get('runs',[]) or []; total=sum(len(r.get('results',[]) or []) for r in runs); print(total)"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -169,14 +169,14 @@ def readCoveragePercents() {
 
 /**
  * JMeter:
- * - Blindado en Windows: cmd /c call para evitar el bug "jmeter.batApacheJMeter.jar"
+ * - Hardened on Windows: cmd /c call to avoid "jmeter.batApacheJMeter.jar" bug
  */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        rem IMPORTANTE: cmd /c call para ejecutar correctamente el .bat
+        rem IMPORTANT: cmd /c call to execute .bat properly
         cmd /c call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
 
         exit /b %ERRORLEVEL%
@@ -209,7 +209,8 @@ pipeline {
         COVERAGE_JSON = 'reports\\coverage\\coverage.json'
 
         FLAKE8_REPORT = 'reports\\static\\flake8.txt'
-        BANDIT_JSON = 'reports\\security\\bandit.json'
+
+        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
@@ -324,62 +325,36 @@ pipeline {
             }
         }
 
-        stage('Security Test (JSON)') {
-			steps {
-				script {
-					runBandit()
-					int findings = countBanditFindings().toInteger()
-					echo "Bandit findings: ${findings}"
-		
-					if (findings >= 4) {
-						catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-							error("Bandit unhealthy: ${findings} >= 4")
-						}
-					} else if (findings >= 2) {
-						catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-							error("Bandit unstable: ${findings} >= 2")
-						}
-					} else {
-						echo "Bandit OK (<2)"
-					}
-				}
-			}
-			post {
-				always {
-					// Tu Jenkins NO tiene groovyParser(), pero SI tiene groovyScript()
-					recordIssues(
-						tools: [
-							groovyScript(
-								id: 'bandit-json',
-								name: 'Bandit',
-								pattern: "${BANDIT_JSON}",
-								// Capturamos 3 campos del JSON (match por issue)
-								regexp: '\\"test_id\\"\\s*:\\s*\\"(B\\d+)\\"[\\s\\S]*?\\"issue_severity\\"\\s*:\\s*\\"(LOW|MEDIUM|HIGH)\\"[\\s\\S]*?\\"filename\\"\\s*:\\s*\\"([^\\"]+)\\"',
-								script: '''
-									import edu.hm.hafner.analysis.Severity
-		
-									def testId = matcher.group(1)
-									def sev = matcher.group(2)
-									def file = matcher.group(3)
-		
-									def s = Severity.WARNING_NORMAL
-									if (sev == 'HIGH') { s = Severity.WARNING_HIGH }
-									else if (sev == 'MEDIUM') { s = Severity.WARNING_NORMAL }
-									else if (sev == 'LOW') { s = Severity.WARNING_LOW }
-		
-									return builder.setFileName(file)
-												.setMessage("Bandit " + testId + " severity=" + sev)
-												.setSeverity(s)
-												.build()
-								'''
-							)
-						],
-						enabledForFailure: true
-					)
-					archiveArtifacts artifacts: "${BANDIT_JSON}", fingerprint: true, allowEmptyArchive: true
-				}
-			}
-		}	
+        stage('Security Test (SARIF)') {
+            steps {
+                script {
+                    runBanditSarif()
+                    int findings = countBanditFindingsSarif().toInteger()
+                    echo "Bandit findings: ${findings}"
+
+                    if (findings >= 4) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Bandit unhealthy: ${findings} >= 4")
+                        }
+                    } else if (findings >= 2) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Bandit unstable: ${findings} >= 2")
+                        }
+                    } else {
+                        echo "Bandit OK (<2)"
+                    }
+                }
+            }
+            post {
+                always {
+                    recordIssues(
+                        tools: [sarif(pattern: "${BANDIT_SARIF}")],
+                        enabledForFailure: true
+                    )
+                    archiveArtifacts artifacts: "${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
 
         stage('Performance') {
             steps {
