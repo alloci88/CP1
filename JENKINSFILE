@@ -93,17 +93,13 @@ def runFlake8() {
     """.stripIndent())
 }
 
-/**
- * Bandit -> SARIF (for Warnings-NG sarif())
- * - Generate SARIF to publish issues without Groovy parser config
- * - Return 0 so we can apply our own quality gate based on count
- */
-def runBanditSarif() {
-    runBat('Bandit (SARIF)', """
+def runBandit() {
+    runBat('Bandit (JSON+TXT)', """
         @echo off
         set PYTHONPATH=.
-        rem Bandit may return non-zero when issues exist, do NOT fail here
-        "%PYTHON_BIN%" -m bandit -r app -f sarif -o "%BANDIT_SARIF%"
+        rem Bandit devuelve exit code != 0 si hay issues; NO queremos cortar aqui
+        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
+        "%PYTHON_BIN%" -m bandit -r app -f txt  -o "%BANDIT_REPORT%"
         exit /b 0
     """.stripIndent())
 }
@@ -121,17 +117,14 @@ def countFlake8Findings() {
     ).trim()
 }
 
-/**
- * Bandit SARIF: count number of results (runs[].results)
- */
-def countBanditFindingsSarif() {
+def countBanditFindings() {
     return bat(
-        label: 'Count Bandit findings (SARIF)',
+        label: 'Count Bandit findings (JSON)',
         returnStdout: true,
         script: """
             @echo off
-            if not exist "%BANDIT_SARIF%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_SARIF%')); runs=d.get('runs',[]) or []; total=sum(len(r.get('results',[]) or []) for r in runs); print(total)"
+            if not exist "%BANDIT_JSON%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_JSON%')); print(len(d.get('results',[])))"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -167,17 +160,13 @@ def readCoveragePercents() {
     return [linesPct, branchesPct]
 }
 
-/**
- * JMeter:
- * - Hardened on Windows: cmd /c call to avoid "jmeter.batApacheJMeter.jar" bug
- */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        rem IMPORTANT: cmd /c call to execute .bat properly
-        cmd /c call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        rem Patron robusto de cmd.exe para .bat con paths con espacios
+        cmd /c ""%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"" 
 
         exit /b %ERRORLEVEL%
     """.stripIndent())
@@ -210,7 +199,8 @@ pipeline {
 
         FLAKE8_REPORT = 'reports\\static\\flake8.txt'
 
-        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
+        BANDIT_JSON = 'reports\\security\\bandit.json'
+		BANDIT_REPORT = 'reports\\security\\bandit.txt'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
@@ -325,36 +315,36 @@ pipeline {
             }
         }
 
-        stage('Security Test (SARIF)') {
-            steps {
-                script {
-                    runBanditSarif()
-                    int findings = countBanditFindingsSarif().toInteger()
-                    echo "Bandit findings: ${findings}"
-
-                    if (findings >= 4) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Bandit unhealthy: ${findings} >= 4")
-                        }
-                    } else if (findings >= 2) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Bandit unstable: ${findings} >= 2")
-                        }
-                    } else {
-                        echo "Bandit OK (<2)"
-                    }
-                }
-            }
-            post {
-                always {
-                    recordIssues(
-                        tools: [sarif(pattern: "${BANDIT_SARIF}")],
-                        enabledForFailure: true
-                    )
-                    archiveArtifacts artifacts: "${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
-                }
-            }
-        }
+		stage('Security Test (Bandit)') {
+			steps {
+				script {
+					runBandit()
+					int findings = countBanditFindings().toInteger()
+					echo "Bandit findings: ${findings}"
+		
+					if (findings >= 4) {
+						catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+							error("Bandit unhealthy: ${findings} >= 4")
+						}
+					} else if (findings >= 2) {
+						catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+							error("Bandit unstable: ${findings} >= 2")
+						}
+					} else {
+						echo "Bandit OK (<2)"
+					}
+				}
+			}
+			post {
+				always {
+					recordIssues(
+						tools: [bandit(pattern: "${BANDIT_REPORT}")],
+						enabledForFailure: true
+					)
+					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT}", fingerprint: true, allowEmptyArchive: true
+				}
+			}
+		}
 
         stage('Performance') {
             steps {
