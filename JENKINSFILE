@@ -3,28 +3,13 @@
  * Funciones auxiliares
  * =========================
  *
- * Estas funciones encapsulan lógica repetitiva para:
- *  - Evitar bloques bat gigantes y difíciles de mantener
- *  - Reducir duplicación
- *  - Hacer el Jenkinsfile más legible y evaluable
- *
  * Todo sigue estando dentro del Jenkinsfile (requisito del enunciado)
  */
 
-/**
- * Ejecuta un comando batch con una etiqueta clara en el log de Jenkins
- */
 def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
-/**
- * Verificaciones iniciales del workspace:
- *  - Información del entorno
- *  - Creación del directorio de reports
- *  - Verificación de Python
- *  - Verificación del JAR de Wiremock
- */
 def prepWorkspace() {
     runBat('Workspace / Tools', """
         @echo off
@@ -35,6 +20,12 @@ def prepWorkspace() {
         echo %WORKSPACE%
 
         if not exist "%REPORTS_DIR%" mkdir "%REPORTS_DIR%"
+        if not exist "%REPORTS_UNIT_DIR%" mkdir "%REPORTS_UNIT_DIR%"
+        if not exist "%REPORTS_REST_DIR%" mkdir "%REPORTS_REST_DIR%"
+        if not exist "%REPORTS_STATIC_DIR%" mkdir "%REPORTS_STATIC_DIR%"
+        if not exist "%REPORTS_SECURITY_DIR%" mkdir "%REPORTS_SECURITY_DIR%"
+        if not exist "%REPORTS_COVERAGE_DIR%" mkdir "%REPORTS_COVERAGE_DIR%"
+        if not exist "%REPORTS_PERFORMANCE_DIR%" mkdir "%REPORTS_PERFORMANCE_DIR%"
 
         echo === Python ===
         "%PYTHON_BIN%" --version
@@ -42,14 +33,13 @@ def prepWorkspace() {
         echo === Wiremock jar ===
         if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)
 
+        echo === JMeter ===
+        if exist "%JMETER_BIN%" (echo JMeter OK) else (echo JMeter NO EXISTE & exit /b 1)
+
         exit /b 0
     """.stripIndent())
 }
 
-/**
- * Mata procesos que estén escuchando en un puerto concreto.
- * Es idempotente: si no hay procesos, no falla.
- */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
@@ -61,14 +51,6 @@ def killByPort(String port) {
     """.stripIndent())
 }
 
-/**
- * Espera a que una URL devuelva HTTP 200.
- * Se usa como healthcheck antes de lanzar los tests REST.
- *
- * NOTA IMPORTANTE (Groovy):
- * - Dentro de strings GString (""" ... """) el símbolo $ intenta interpolar.
- * - Para un $ literal (regex fin de línea en findstr), hay que usar \$.
- */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label, """
         @echo off
@@ -81,9 +63,6 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     """.stripIndent())
 }
 
-/**
- * Arranca la aplicación Flask en segundo plano
- */
 def startFlask() {
     runBat('Start Flask', """
         @echo off
@@ -94,9 +73,6 @@ def startFlask() {
     """.stripIndent())
 }
 
-/**
- * Arranca Wiremock en segundo plano
- */
 def startWiremock() {
     runBat('Start Wiremock', """
         @echo off
@@ -106,20 +82,29 @@ def startWiremock() {
 }
 
 /**
- * Ejecuta los tests unitarios y genera reporte JUnit
+ * Unit tests (SOLO 1 vez) + coverage (líneas + ramas) + JUnit
+ * Genera:
+ *  - %UNIT_JUNIT%
+ *  - %COVERAGE_XML%
+ *  - %COVERAGE_JSON%
  */
-def runUnitTests() {
-    runBat('Pytest Unit', """
+def runUnitTestsWithCoverage() {
+    runBat('Pytest Unit + Coverage', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m pytest --junitxml=%UNIT_JUNIT% test\\unit
-        exit /b %ERRORLEVEL%
+
+        rem Ejecuta pytest UNA VEZ bajo coverage con branch coverage
+        "%PYTHON_BIN%" -m coverage run --branch -m pytest --junitxml=%UNIT_JUNIT% test\\unit
+        set EXITCODE=%ERRORLEVEL%
+
+        rem Genera informes (sin re-ejecutar tests)
+        "%PYTHON_BIN%" -m coverage xml -o %COVERAGE_XML%
+        "%PYTHON_BIN%" -m coverage json -o %COVERAGE_JSON%
+
+        exit /b %EXITCODE%
     """.stripIndent())
 }
 
-/**
- * Ejecuta los tests REST y genera reporte JUnit
- */
 def runRestTests() {
     runBat('Pytest Rest', """
         @echo off
@@ -129,40 +114,151 @@ def runRestTests() {
     """.stripIndent())
 }
 
-/*
- * =========================
- * Pipeline Declarativo
- * =========================
+/**
+ * Flake8 -> report (formato parseable)
  */
+def runFlake8() {
+    runBat('Flake8', """
+        @echo off
+        set PYTHONPATH=.
+        rem flake8 devuelve exit code != 0 si hay issues, NO queremos cortar aquí
+        "%PYTHON_BIN%" -m flake8 app test --format=default > "%FLAKE8_REPORT%"
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Bandit -> JSON report (parseable) + TXT opcional
+ */
+def runBandit() {
+    runBat('Bandit', """
+        @echo off
+        set PYTHONPATH=.
+        rem Bandit devuelve exit code != 0 si hay issues, NO queremos cortar aquí
+        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_REPORT%" 
+        exit /b 0
+    """.stripIndent())
+}
+
+/**
+ * Cuenta líneas del reporte flake8 (cada issue suele ser una línea)
+ */
+def countFlake8Findings() {
+    return bat(
+        label: 'Count Flake8 findings',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%FLAKE8_REPORT%" (echo 0 & exit /b 0)
+            for /f %%a in ('type "%FLAKE8_REPORT%" ^| find /c ":"') do @echo %%a
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+}
+
+/**
+ * Cuenta hallazgos bandit en JSON (len(results))
+ */
+def countBanditFindings() {
+    return bat(
+        label: 'Count Bandit findings',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%BANDIT_REPORT%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_REPORT%')); print(len(d.get('results',[])))"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+}
+
+/**
+ * Extrae cobertura de coverage.json (líneas y ramas) como porcentajes [0..100]
+ */
+def readCoveragePercents() {
+    String out = bat(
+        label: 'Read coverage percents',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%COVERAGE_JSON%" (echo LINES=0 BRANCHES=0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"LINES={t.get('percent_covered',0):.2f} BRANCHES={t.get('percent_covered_display','0')}\\\")"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    // Ojo: coverage.json no siempre trae branches percent directo según versión
+    // Mejor: calculamos branches a partir de totals (covered_branches/num_branches)
+    String out2 = bat(
+        label: 'Read branch coverage percent',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    // Parse líneas
+    def m = (out =~ /LINES=([0-9.]+)/)
+    double linesPct = m ? m[0][1].toDouble() : 0.0
+    double branchesPct = out2 ? out2.toDouble() : 0.0
+
+    return [linesPct, branchesPct]
+}
+
+/**
+ * Ejecuta JMeter contra Flask usando el test-plan existente
+ * Genera .jtl para Performance plugin
+ */
+def runJmeter() {
+    runBat('JMeter', """
+        @echo off
+        if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
+
+        "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        exit /b %ERRORLEVEL%
+    """.stripIndent())
+}
 
 pipeline {
     agent any
 
-    /*
-     * Opciones globales del pipeline
-     * - timestamps: añade marcas de tiempo a los logs
-     * - skipDefaultCheckout: evitamos el checkout implícito
-     *   porque controlamos nosotros el Git explícitamente
-     */
     options {
         timestamps()
         skipDefaultCheckout(true)
     }
 
-    /*
-     * Variables de entorno comunes a todo el pipeline
-     */
     environment {
         PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
 
         REPORTS_DIR = 'reports'
-        UNIT_JUNIT = 'reports\\result-unit.xml'
-        REST_JUNIT = 'reports\\result-rest.xml'
+        REPORTS_UNIT_DIR = 'reports\\unit'
+        REPORTS_REST_DIR = 'reports\\rest'
+        REPORTS_STATIC_DIR = 'reports\\static'
+        REPORTS_SECURITY_DIR = 'reports\\security'
+        REPORTS_COVERAGE_DIR = 'reports\\coverage'
+        REPORTS_PERFORMANCE_DIR = 'reports\\performance'
+
+        UNIT_JUNIT = 'reports\\unit\\result-unit.xml'
+        REST_JUNIT = 'reports\\rest\\result-rest.xml'
+
+        COVERAGE_XML = 'reports\\coverage\\coverage.xml'
+        COVERAGE_JSON = 'reports\\coverage\\coverage.json'
+
+        FLAKE8_REPORT = 'reports\\static\\flake8.txt'
+        BANDIT_REPORT = 'reports\\security\\bandit.json'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
+
+        // Ajusta estas rutas a tu instalación real
+        JMETER_BIN = 'C:\\ci\\tools\\apache-jmeter-5.5\\bin\\jmeter.bat'
+        JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
+        JMETER_JTL = 'reports\\performance\\jmeter.jtl'
 
         REPO_URL = 'https://github.com/alloci88/CP1.git'
         REPO_BRANCH = '*/master'
@@ -171,13 +267,6 @@ pipeline {
 
     stages {
 
-        /*
-         * =========================
-         * Stage: Get Code
-         * =========================
-         * - Checkout explícito del repositorio
-         * - Preparación del workspace
-         */
         stage('Get Code') {
             steps {
                 checkout([
@@ -188,22 +277,27 @@ pipeline {
                     userRemoteConfigs: [[url: "${REPO_URL}"]],
                     gitTool: "${GIT_TOOL}"
                 ])
-
                 prepWorkspace()
             }
         }
 
         /*
-         * =========================
-         * Stage: Unit
-         * =========================
-         * - Ejecuta tests unitarios
-         * - Si fallan, el stage falla pero el pipeline continúa
+         * Unit: debe quedar VERDE siempre (aunque fallen tests)
+         * Pero publicamos JUnit y generamos coverage.*
          */
         stage('Unit') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    runUnitTests()
+                script {
+                    int rc = bat(returnStatus: true, label: 'Pytest Unit + Coverage', script: """
+                        @echo off
+                        call "${PYTHON_BIN}" -m coverage run --branch -m pytest --junitxml=${UNIT_JUNIT} test\\unit
+                        set EXITCODE=%ERRORLEVEL%
+                        call "${PYTHON_BIN}" -m coverage xml -o ${COVERAGE_XML}
+                        call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
+                        exit /b %EXITCODE%
+                    """.stripIndent())
+
+                    echo "Unit exit code: ${rc} (la etapa debe quedar verde según guía)"
                 }
             }
             post {
@@ -214,19 +308,11 @@ pipeline {
         }
 
         /*
-         * =========================
-         * Stage: Rest
-         * =========================
-         * - Limpia posibles procesos previos
-         * - Arranca Flask y Wiremock
-         * - Espera a que estén operativos
-         * - Ejecuta tests REST
-         * - Limpia procesos SIEMPRE al final
+         * Rest: misma filosofía; si falla, no tumba el pipeline y la etapa debe verse verde
          */
         stage('Rest') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-
+                script {
                     // Limpieza preventiva
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
@@ -239,18 +325,176 @@ pipeline {
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask')
                     waitHttp200("http://127.0.0.1:${env.WIREMOCK_PORT}/__admin", 10, 2, 'Healthcheck Wiremock')
 
-                    // Tests REST
-                    runRestTests()
+                    int rc = bat(returnStatus: true, label: 'Pytest Rest', script: """
+                        @echo off
+                        set PYTHONPATH=.
+                        "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
+                        exit /b %ERRORLEVEL%
+                    """.stripIndent())
+
+                    echo "Rest exit code: ${rc} (la etapa debe quedar verde según guía)"
                 }
             }
             post {
                 always {
-                    // Limpieza garantizada incluso si fallan tests
                     script {
                         killByPort(env.FLASK_PORT)
                         killByPort(env.WIREMOCK_PORT)
                     }
                     junit testResults: "${REST_JUNIT}", allowEmptyResults: true
+                }
+            }
+        }
+
+        /*
+         * Static (Flake8):
+         * >=10 -> rojo (FAILURE), >=8 -> unstable, siempre continúa
+         */
+        stage('Static') {
+            steps {
+                script {
+                    runFlake8()
+                    int findings = countFlake8Findings().toInteger()
+                    echo "Flake8 findings: ${findings}"
+
+                    if (findings >= 10) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Flake8 unhealthy: ${findings} >= 10")
+                        }
+                    } else if (findings >= 8) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Flake8 unstable: ${findings} >= 8")
+                        }
+                    } else {
+                        echo "Flake8 OK (<8)"
+                    }
+                }
+            }
+            post {
+                always {
+                    // Warnings-NG (Flake8)
+                    recordIssues(
+                        tools: [flake8(pattern: "${FLAKE8_REPORT}")],
+                        enabledForFailure: true
+                    )
+                }
+            }
+        }
+
+        /*
+         * Security (Bandit):
+         * >=4 -> rojo, >=2 -> unstable, siempre continúa
+         */
+        stage('Security Test') {
+            steps {
+                script {
+                    runBandit()
+                    int findings = countBanditFindings().toInteger()
+                    echo "Bandit findings: ${findings}"
+
+                    if (findings >= 4) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Bandit unhealthy: ${findings} >= 4")
+                        }
+                    } else if (findings >= 2) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Bandit unstable: ${findings} >= 2")
+                        }
+                    } else {
+                        echo "Bandit OK (<2)"
+                    }
+                }
+            }
+            post {
+                always {
+                    // Warnings-NG (Bandit) — dependiendo de plugin puede ser 'bandit()' o 'groovyScript'
+                    // Si tu instalación no trae parser Bandit, lo cambiamos por parser genérico.
+                    recordIssues(
+                        tools: [bandit(pattern: "${BANDIT_REPORT}")],
+                        enabledForFailure: true
+                    )
+                }
+            }
+        }
+
+        /*
+         * Performance (JMeter):
+         * Arranca Flask, ejecuta JMeter, publica .jtl y mata Flask
+         */
+        stage('Performance') {
+            steps {
+                script {
+                    killByPort(env.FLASK_PORT)
+                    startFlask()
+                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
+
+                    // Ejecuta JMeter
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        runJmeter()
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        killByPort(env.FLASK_PORT)
+                    }
+                    // Plugin Performance
+                    perfReport(
+                        sourceDataFiles: "${JMETER_JTL}",
+                        errorFailedThreshold: 0,
+                        errorUnstableThreshold: 0
+                    )
+                    archiveArtifacts artifacts: "${JMETER_JTL}", fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
+
+        /*
+         * Coverage:
+         * NO re-ejecuta tests (regla de oro)
+         * Lee coverage.json, aplica umbrales y publica cobertura
+         */
+        stage('Coverage') {
+            steps {
+                script {
+                    def (double linesPct, double branchesPct) = readCoveragePercents()
+                    echo "Coverage lines: ${linesPct}%"
+                    echo "Coverage branches: ${branchesPct}%"
+
+                    boolean linesUnstable = (linesPct >= 85.0 && linesPct <= 95.0)
+                    boolean linesFail = (linesPct < 85.0)
+
+                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct <= 90.0)
+                    boolean branchesFail = (branchesPct < 80.0)
+
+                    if (linesFail || branchesFail) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
+                        }
+                    } else if (linesUnstable || branchesUnstable) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
+                        }
+                    } else {
+                        echo "Coverage OK"
+                    }
+                }
+            }
+            post {
+                always {
+                    // Plugin Cobertura (según instalación: 'cobertura' o 'publishCoverage')
+                    // Opción A: Cobertura clásico
+                    cobertura(
+                        coberturaReportFile: "${COVERAGE_XML}",
+                        autoUpdateHealth: false,
+                        autoUpdateStability: false,
+                        failNoReports: false,
+                        maxNumberOfBuilds: 0,
+                        onlyStable: false,
+                        zoomCoverageChart: false
+                    )
+                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
