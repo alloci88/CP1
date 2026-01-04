@@ -13,6 +13,12 @@ def prepWorkspace() {
     runBat('Workspace / Tools v2', """
         @echo off
         echo === Workspace info ===
+
+        rem cleanup of accidental literal env-var filenames
+        if exist "%%BANDIT_SARIF%%" del /q "%%BANDIT_SARIF%%" 1>nul 2>nul
+        if exist "%%BANDIT_JSON%%" del /q "%%BANDIT_JSON%%" 1>nul 2>nul
+        if exist "%%BANDIT_REPORT%%" del /q "%%BANDIT_REPORT%%" 1>nul 2>nul
+
         dir
         whoami
         hostname
