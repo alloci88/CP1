@@ -97,32 +97,104 @@ def runBandit() {
     runBat('Bandit (JSON+TXT)', """
         @echo off
         set PYTHONPATH=.
-        rem Bandit devuelve exit code != 0 si hay issues; NO queremos cortar aqui
+        rem Bandit returns exit code != 0 if issues exist; do NOT fail here
         "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
         "%PYTHON_BIN%" -m bandit -r app -f txt  -o "%BANDIT_REPORT%"
         exit /b 0
     """.stripIndent())
 }
 
+/*
+ * Convert Bandit JSON to SARIF using inline Python.
+ * IMPORTANT: Do NOT include "$schema" in SARIF because Groovy GStrings treat $ as interpolation.
+ */
 def banditJsonToSarif() {
     runBat('Convert Bandit JSON -> SARIF', """
         @echo off
-        if not exist "%BANDIT_JSON%" (
-            rem si no hay json, crea sarif vacio para que recordIssues no se queje
-            "%PYTHON_BIN%" -c "import json; open(r'%BANDIT_SARIF%','w',encoding='utf-8').write(json.dumps({'version':'2.1.0','$schema':'https://json.schemastore.org/sarif-2.1.0.json','runs':[{'tool':{'driver':{'name':'bandit','informationUri':'https://bandit.readthedocs.io','rules':[]}},'results':[]}]}, ensure_ascii=False))"
-            exit /b 0
-        )
 
-        "%PYTHON_BIN%" -c "import json, os; d=json.load(open(r'%BANDIT_JSON%','r',encoding='utf-8')); results=[]; rules={}; \
-			for r in d.get('results',[]): \
-			rid=str(r.get('test_id','BANDIT')); rules[rid]={'id':rid,'name':rid,'shortDescription':{'text':r.get('issue_text','Bandit issue')}}; \
-			file=r.get('filename','unknown'); line=int(r.get('line_number',1) or 1); \
-			sev=str(r.get('issue_severity','MEDIUM')).upper(); level='warning'; \
-			level = 'error' if sev=='HIGH' else ('note' if sev=='LOW' else 'warning'); \
-			msg=f\"{rid}: {r.get('issue_text','Bandit issue')}\"; \
-			results.append({'ruleId':rid,'level':level,'message':{'text':msg},'locations':[{'physicalLocation':{'artifactLocation':{'uri':file},'region':{'startLine':line}}}]}); \
-			sarif={'version':'2.1.0','$schema':'https://json.schemastore.org/sarif-2.1.0.json','runs':[{'tool':{'driver':{'name':'bandit','informationUri':'https://bandit.readthedocs.io','rules':list(rules.values())}},'results':results}]}; \
-			open(r'%BANDIT_SARIF%','w',encoding='utf-8').write(json.dumps(sarif, ensure_ascii=False))"
+        "%PYTHON_BIN%" - <<PY
+import json
+from pathlib import Path
+
+bandit_json = Path(r"%BANDIT_JSON%")
+sarif_path = Path(r"%BANDIT_SARIF%")
+
+def write_empty():
+    sarif = {
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "bandit",
+                    "informationUri": "https://bandit.readthedocs.io",
+                    "rules": []
+                }
+            },
+            "results": []
+        }]
+    }
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
+
+if not bandit_json.exists():
+    write_empty()
+    raise SystemExit(0)
+
+data = json.loads(bandit_json.read_text(encoding="utf-8"))
+results_in = data.get("results", []) or []
+
+rules = {}
+results = []
+
+for r in results_in:
+    rid = str(r.get("test_id") or "BANDIT")
+    text = str(r.get("issue_text") or "Bandit issue")
+    file_name = str(r.get("filename") or "unknown")
+    line = int(r.get("line_number") or 1)
+
+    sev = str(r.get("issue_severity") or "MEDIUM").upper()
+    level = "warning"
+    if sev == "HIGH":
+        level = "error"
+    elif sev == "LOW":
+        level = "note"
+
+    rules.setdefault(rid, {
+        "id": rid,
+        "name": rid,
+        "shortDescription": {"text": text}
+    })
+
+    results.append({
+        "ruleId": rid,
+        "level": level,
+        "message": {"text": f"{rid}: {text}"},
+        "locations": [{
+            "physicalLocation": {
+                "artifactLocation": {"uri": file_name},
+                "region": {"startLine": line}
+            }
+        }]
+    })
+
+sarif = {
+    "version": "2.1.0",
+    "runs": [{
+        "tool": {
+            "driver": {
+                "name": "bandit",
+                "informationUri": "https://bandit.readthedocs.io",
+                "rules": list(rules.values())
+            }
+        },
+        "results": results
+    }]
+}
+
+sarif_path.parent.mkdir(parents=True, exist_ok=True)
+sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
+PY
+
         exit /b 0
     """.stripIndent())
 }
@@ -188,7 +260,7 @@ def runJmeter() {
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        rem Importante: ejecutar .bat con CALL para que cmd no haga cosas raras
+        rem IMPORTANT: execute .bat with CALL so cmd returns properly
         call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
         set RC=%ERRORLEVEL%
 
@@ -225,8 +297,8 @@ pipeline {
         FLAKE8_REPORT = 'reports\\static\\flake8.txt'
 
         BANDIT_JSON = 'reports\\security\\bandit.json'
-		BANDIT_REPORT = 'reports\\security\\bandit.txt'
-		BANDIT_SARIF = 'reports\\security\\bandit.sarif'
+        BANDIT_REPORT = 'reports\\security\\bandit.txt'
+        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
@@ -341,39 +413,42 @@ pipeline {
             }
         }
 
-		stage('Security Test (Bandit)') {
-			steps {
-				script {
-					runBandit()
-					int findings = countBanditFindings().toInteger()
-					echo "Bandit findings: ${findings}"
-		
-					if (findings >= 4) {
-						catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-							error("Bandit unhealthy: ${findings} >= 4")
-						}
-					} else if (findings >= 2) {
-						catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-							error("Bandit unstable: ${findings} >= 2")
-						}
-					} else {
-						echo "Bandit OK (<2)"
-					}
-				}
-			}
-			post {
-				always {
-					script {
-						banditJsonToSarif()
-					}
-					recordIssues(
-						enabledForFailure: true,
-						tools: [sarif(pattern: "${BANDIT_SARIF}")]
-					)
-					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
-				}
-			}
-		}
+        stage('Security Test (Bandit)') {
+            steps {
+                script {
+                    runBandit()
+                    int findings = countBanditFindings().toInteger()
+                    echo "Bandit findings: ${findings}"
+
+                    if (findings >= 4) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Bandit unhealthy: ${findings} >= 4")
+                        }
+                    } else if (findings >= 2) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Bandit unstable: ${findings} >= 2")
+                        }
+                    } else {
+                        echo "Bandit OK (<2)"
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        // Post must never kill the pipeline (enunciado: stages red but continue)
+                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                            banditJsonToSarif()
+                            recordIssues(
+                                enabledForFailure: true,
+                                tools: [sarif(pattern: "${BANDIT_SARIF}")]
+                            )
+                        }
+                    }
+                    archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
 
         stage('Performance') {
             steps {
