@@ -1,31 +1,16 @@
 /*
  * =========================
- * Funciones auxiliares
+ * Helper functions
  * =========================
- *
- * Todo sigue estando dentro del Jenkinsfile (requisito del enunciado)
+ * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
  */
 
-/**
- * Wrapper para ejecutar bat con etiqueta clara en logs.
- */
 def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
-/**
- * Preparación del workspace:
- * - Muestra info del entorno (dir, whoami, hostname, workspace)
- * - Crea carpetas de reports (unit/rest/static/security/coverage/performance)
- * - Verifica que Python está accesible
- * - Verifica que Wiremock (jar) existe
- * - Verifica que JMeter (jmeter.bat) existe
- *
- * Si falla una herramienta obligatoria -> cortamos el pipeline aquí
- * porque el resto de etapas no pueden ejecutarse.
- */
 def prepWorkspace() {
-    runBat('Workspace / Tools', """
+    runBat('Workspace / Tools v2', """
         @echo off
         echo === Workspace info ===
         dir
@@ -45,20 +30,15 @@ def prepWorkspace() {
         "%PYTHON_BIN%" --version
 
         echo === Wiremock jar ===
-        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock NO EXISTE & exit /b 1)
+        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock MISSING & exit /b 1)
 
         echo === JMeter ===
-        if exist "%JMETER_BIN%" (echo JMeter OK) else (echo JMeter NO EXISTE & exit /b 1)
+        if exist "%JMETER_BIN%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
 
         exit /b 0
     """.stripIndent())
 }
 
-/**
- * Mata procesos escuchando en un puerto (idempotente).
- * - Si no hay procesos -> no falla.
- * - Si los mata -> lo reporta.
- */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
@@ -70,11 +50,6 @@ def killByPort(String port) {
     """.stripIndent())
 }
 
-/**
- * Healthcheck: espera HTTP 200 de una URL.
- * - Reintenta maxTries veces, con timeoutSec.
- * - Si nunca llega a 200 -> devuelve error.
- */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label, """
         @echo off
@@ -87,10 +62,6 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     """.stripIndent())
 }
 
-/**
- * Arranca Flask en segundo plano:
- * - Escucha en 127.0.0.1:%FLASK_PORT%
- */
 def startFlask() {
     runBat('Start Flask', """
         @echo off
@@ -101,11 +72,6 @@ def startFlask() {
     """.stripIndent())
 }
 
-/**
- * Arranca Wiremock en segundo plano:
- * - Escucha en %WIREMOCK_PORT%
- * - Usa mappings en test\\wiremock
- */
 def startWiremock() {
     runBat('Start Wiremock', """
         @echo off
@@ -114,86 +80,33 @@ def startWiremock() {
     """.stripIndent())
 }
 
-/**
- * Unit tests (SOLO 1 vez) + coverage (líneas + ramas) + JUnit
- * Genera:
- *  - %UNIT_JUNIT%
- *  - %COVERAGE_XML%
- *  - %COVERAGE_JSON%
- *
- * IMPORTANTE:
- * - pytest se ejecuta UNA SOLA VEZ (regla del enunciado)
- * - luego solo generamos reportes a partir de los datos ya producidos
- */
-def runUnitTestsWithCoverage() {
-    runBat('Pytest Unit + Coverage', """
-        @echo off
-        set PYTHONPATH=.
-
-        rem Ejecuta pytest UNA VEZ bajo coverage con branch coverage
-        "%PYTHON_BIN%" -m coverage run --branch -m pytest --junitxml=%UNIT_JUNIT% test\\unit
-        set EXITCODE=%ERRORLEVEL%
-
-        rem Genera informes (sin re-ejecutar tests)
-        "%PYTHON_BIN%" -m coverage xml -o %COVERAGE_XML%
-        "%PYTHON_BIN%" -m coverage json -o %COVERAGE_JSON%
-
-        exit /b %EXITCODE%
-    """.stripIndent())
-}
-
-/**
- * Tests de integración REST (pytest)
- * Genera:
- *  - %REST_JUNIT%
- */
-def runRestTests() {
-    runBat('Pytest Rest', """
-        @echo off
-        set PYTHONPATH=.
-        "%PYTHON_BIN%" -m pytest --junitxml=%REST_JUNIT% test\\rest
-        exit /b %ERRORLEVEL%
-    """.stripIndent())
-}
-
-/**
- * Static analysis con flake8:
- * - Genera report en texto (parseable por Warnings-NG flake8)
- * - Devuelve 0 siempre para no parar la pipeline aquí
+/*
+ * Flake8 -> report parseable by Warnings-NG flake8()
  */
 def runFlake8() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        rem flake8 devuelve exit code != 0 si hay issues, NO queremos cortar aquí
+        rem flake8 returns non-zero when issues exist, do NOT fail here
         "%PYTHON_BIN%" -m flake8 app test --format=default > "%FLAKE8_REPORT%"
         exit /b 0
     """.stripIndent())
 }
 
-/**
- * Security analysis con bandit:
- * - Genera SARIF para que Warnings-NG lo procese "limpio" con parser sarif()
- * - Devuelve 0 siempre para no cortar la ejecución
- *
- * NOTA:
- * - Tu Jenkins NO tiene DSL bandit(), por eso usamos SARIF + sarif()
+/*
+ * Bandit -> JSON (bandit 1.9.2 does NOT support SARIF)
+ * Generate JSON for counting and Warnings-NG parsing.
  */
 def runBandit() {
-    runBat('Bandit (SARIF)', """
+    runBat('Bandit (JSON)', """
         @echo off
         set PYTHONPATH=.
-        rem Bandit devuelve exit code != 0 si hay issues, NO queremos cortar aquí
-        "%PYTHON_BIN%" -m bandit -r app -f sarif -o "%BANDIT_SARIF%"
+        rem bandit returns non-zero when issues exist, do NOT fail here
+        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
         exit /b 0
     """.stripIndent())
 }
 
-/**
- * Cuenta hallazgos flake8:
- * - Aproximación: contar líneas con ":" en el output
- * - Sirve para aplicar umbrales 8/10 del enunciado
- */
 def countFlake8Findings() {
     return bat(
         label: 'Count Flake8 findings',
@@ -207,37 +120,27 @@ def countFlake8Findings() {
     ).trim()
 }
 
-/**
- * Cuenta hallazgos Bandit desde SARIF:
- * - SARIF: runs[0].results.length
- * - Sirve para aplicar umbrales 2/4 del enunciado
- */
 def countBanditFindings() {
     return bat(
-        label: 'Count Bandit findings (SARIF)',
+        label: 'Count Bandit findings (JSON)',
         returnStdout: true,
         script: """
             @echo off
-            if not exist "%BANDIT_SARIF%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_SARIF%')); runs=d.get('runs',[]); res=(runs[0].get('results',[]) if runs else []); print(len(res))"
+            if not exist "%BANDIT_JSON%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_JSON%')); print(len(d.get('results',[])))"
             exit /b 0
         """.stripIndent()
     ).trim()
 }
 
-/**
- * Extrae cobertura de coverage.json (líneas y ramas) como porcentajes [0..100]
- * - linesPct: totals.percent_covered
- * - branchesPct: (covered_branches / num_branches) * 100
- */
 def readCoveragePercents() {
     String out = bat(
         label: 'Read coverage percents',
         returnStdout: true,
         script: """
             @echo off
-            if not exist "%COVERAGE_JSON%" (echo LINES=0 BRANCHES=0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"LINES={t.get('percent_covered',0):.2f} BRANCHES={t.get('percent_covered_display','0')}\\\")"
+            if not exist "%COVERAGE_JSON%" (echo LINES=0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"LINES={t.get('percent_covered',0):.2f}\\\")"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -260,16 +163,17 @@ def readCoveragePercents() {
     return [linesPct, branchesPct]
 }
 
-/**
- * Ejecuta JMeter contra Flask usando el test-plan existente
- * - Genera .jtl para el plugin Performance
+/*
+ * JMeter:
+ * IMPORTANT: execute .bat using call, otherwise you can get:
+ *   jmeter.batApacheJMeter.jar
  */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
         exit /b %ERRORLEVEL%
     """.stripIndent())
 }
@@ -283,10 +187,8 @@ pipeline {
     }
 
     environment {
-        // Python del venv (no instalamos nada desde Jenkinsfile)
         PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
 
-        // Carpetas de reports
         REPORTS_DIR = 'reports'
         REPORTS_UNIT_DIR = 'reports\\unit'
         REPORTS_REST_DIR = 'reports\\rest'
@@ -295,33 +197,24 @@ pipeline {
         REPORTS_COVERAGE_DIR = 'reports\\coverage'
         REPORTS_PERFORMANCE_DIR = 'reports\\performance'
 
-        // JUnit outputs
         UNIT_JUNIT = 'reports\\unit\\result-unit.xml'
         REST_JUNIT = 'reports\\rest\\result-rest.xml'
 
-        // Coverage outputs
         COVERAGE_XML = 'reports\\coverage\\coverage.xml'
         COVERAGE_JSON = 'reports\\coverage\\coverage.json'
 
-        // Static outputs
         FLAKE8_REPORT = 'reports\\static\\flake8.txt'
+        BANDIT_JSON = 'reports\\security\\bandit.json'
 
-        // Security outputs (SARIF para Warnings-NG)
-        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
-
-        // Puertos
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
-        // Herramientas externas (ya instaladas por ti, fuera del Jenkinsfile)
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
-        JMETER_BIN = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\jmeter.bat'
 
-        // Plan de JMeter y salida JTL
+        JMETER_BIN = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\jmeter.bat'
         JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
         JMETER_JTL = 'reports\\performance\\jmeter.jtl'
 
-        // Repo
         REPO_URL = 'https://github.com/alloci88/CP1.git'
         REPO_BRANCH = '*/master'
         GIT_TOOL = 'Default'
@@ -329,11 +222,6 @@ pipeline {
 
     stages {
 
-        /*
-         * Get Code:
-         * - Checkout explícito
-         * - Preparación del workspace + validación herramientas
-         */
         stage('Get Code') {
             steps {
                 checkout([
@@ -348,15 +236,6 @@ pipeline {
             }
         }
 
-        /*
-         * Unit:
-         * - Ejecuta unit tests 1 vez
-         * - Genera cobertura (xml/json) sin re-ejecutar tests
-         * - Publica JUnit
-         *
-         * Según guía: esta etapa debe quedar VERDE aunque fallen tests,
-         * por eso NO hacemos que el stage falle.
-         */
         stage('Unit') {
             steps {
                 script {
@@ -368,8 +247,7 @@ pipeline {
                         call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
                         exit /b %EXITCODE%
                     """.stripIndent())
-
-                    echo "Unit exit code: ${rc} (la etapa debe quedar verde según guía)"
+                    echo "Unit exit code: ${rc} (stage stays green by requirement)"
                 }
             }
             post {
@@ -379,15 +257,6 @@ pipeline {
             }
         }
 
-        /*
-         * Rest:
-         * - Arranca Flask + Wiremock
-         * - Healthchecks
-         * - Ejecuta tests REST
-         * - Limpia procesos SIEMPRE al final
-         *
-         * Según guía: esta etapa debe quedar VERDE aunque fallen tests.
-         */
         stage('Rest') {
             steps {
                 script {
@@ -406,8 +275,7 @@ pipeline {
                         "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
                         exit /b %ERRORLEVEL%
                     """.stripIndent())
-
-                    echo "Rest exit code: ${rc} (la etapa debe quedar verde según guía)"
+                    echo "Rest exit code: ${rc} (stage stays green by requirement)"
                 }
             }
             post {
@@ -421,15 +289,6 @@ pipeline {
             }
         }
 
-        /*
-         * Static (Flake8):
-         * - Ejecuta flake8 y genera reporte
-         * - Aplica umbrales:
-         *   >=10 -> rojo (FAILURE)
-         *   >=8  -> unstable
-         * - El pipeline continúa siempre
-         * - Publica con Warnings-NG (flake8)
-         */
         stage('Static') {
             steps {
                 script {
@@ -460,16 +319,7 @@ pipeline {
             }
         }
 
-        /*
-         * Security Test (Bandit):
-         * - Ejecuta bandit -> SARIF
-         * - Aplica umbrales:
-         *   >=4 -> rojo (FAILURE)
-         *   >=2 -> unstable
-         * - El pipeline continúa siempre
-         * - Publica con Warnings-NG usando parser sarif()
-         */
-        stage('Security Test') {
+        stage('Security Test (JSON)') {
             steps {
                 script {
                     runBandit()
@@ -492,21 +342,37 @@ pipeline {
             post {
                 always {
                     recordIssues(
-                        tools: [sarif(pattern: "${BANDIT_SARIF}")],
+                        tools: [
+                            groovyParser(
+                                id: 'bandit-json',
+                                name: 'Bandit',
+                                pattern: "${BANDIT_JSON}",
+                                regexp: '\\"test_id\\"\\s*:\\s*\\"(B\\\\d+)\\"[\\s\\S]*?\\"issue_severity\\"\\s*:\\s*\\"(LOW|MEDIUM|HIGH)\\"[\\s\\S]*?\\"filename\\"\\s*:\\s*\\"([^\\"]+)\\"',
+                                script: """
+                                    import edu.hm.hafner.analysis.Severity
+                                    def testId = matcher.group(1)
+                                    def sev = matcher.group(2)
+                                    def file = matcher.group(3)
+
+                                    def s = Severity.WARNING_NORMAL
+                                    if (sev == 'HIGH') { s = Severity.WARNING_HIGH }
+                                    else if (sev == 'MEDIUM') { s = Severity.WARNING_NORMAL }
+                                    else if (sev == 'LOW') { s = Severity.WARNING_LOW }
+
+                                    return builder.setFileName(file)
+                                                  .setMessage("Bandit " + testId + " severity=" + sev)
+                                                  .setSeverity(s)
+                                                  .build()
+                                """
+                            )
+                        ],
                         enabledForFailure: true
                     )
-                    archiveArtifacts artifacts: "${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+                    archiveArtifacts artifacts: "${BANDIT_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
 
-        /*
-         * Performance (JMeter):
-         * - Arranca Flask (sin Wiremock, no hace falta)
-         * - Healthcheck
-         * - Ejecuta JMeter en modo no-GUI con el .jmx
-         * - Publica con plugin Performance y archiva el JTL
-         */
         stage('Performance') {
             steps {
                 script {
@@ -521,9 +387,7 @@ pipeline {
             }
             post {
                 always {
-                    script {
-                        killByPort(env.FLASK_PORT)
-                    }
+                    script { killByPort(env.FLASK_PORT) }
                     perfReport(
                         sourceDataFiles: "${JMETER_JTL}",
                         errorFailedThreshold: 0,
@@ -534,20 +398,6 @@ pipeline {
             }
         }
 
-        /*
-         * Coverage:
-         * - NO re-ejecuta unit tests (regla de oro)
-         * - Lee coverage.json y aplica umbrales:
-         *   Lines:
-         *     <85  -> rojo
-         *     85-95 -> unstable
-         *     >95 -> verde
-         *   Branches:
-         *     <80  -> rojo
-         *     80-90 -> unstable
-         *     >90 -> verde
-         * - Publica cobertura con plugin Cobertura (si tu Jenkins usa otro step, lo ajustamos)
-         */
         stage('Coverage') {
             steps {
                 script {
@@ -576,14 +426,9 @@ pipeline {
             }
             post {
                 always {
-                    cobertura(
-                        coberturaReportFile: "${COVERAGE_XML}",
-                        autoUpdateHealth: false,
-                        autoUpdateStability: false,
-                        failNoReports: false,
-                        maxNumberOfBuilds: 0,
-                        onlyStable: false,
-                        zoomCoverageChart: false
+                    recordCoverage(
+                        tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+                        sourceCodeRetention: 'EVERY_BUILD'
                     )
                     archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
