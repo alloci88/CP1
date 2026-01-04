@@ -33,7 +33,7 @@ def prepWorkspace() {
         if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock MISSING & exit /b 1)
 
         echo === JMeter ===
-        if exist "%JMETER_BIN%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
+        if exist "%JMETER_JAR%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
 
         exit /b 0
     """.stripIndent())
@@ -105,14 +105,14 @@ def runBandit() {
 }
 
 /*
- * Convert Bandit JSON to SARIF using inline Python.
- * IMPORTANT: Do NOT include "$schema" in SARIF because Groovy GStrings treat $ as interpolation.
+ * Convert Bandit JSON to SARIF.
+ * We avoid cmd heredocs ("<<") because Windows cmd doesn't support them.
+ * We also avoid "$schema" (SARIF field) to prevent Groovy GString "$" interpolation pitfalls.
  */
 def banditJsonToSarif() {
-    runBat('Convert Bandit JSON -> SARIF', """
-        @echo off
-
-        "%PYTHON_BIN%" - <<PY
+    writeFile(
+        file: 'reports\\security\\bandit_to_sarif.py',
+        text: '''
 import json
 from pathlib import Path
 
@@ -193,8 +193,12 @@ sarif = {
 
 sarif_path.parent.mkdir(parents=True, exist_ok=True)
 sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
-PY
+'''.stripIndent()
+    )
 
+    runBat('Convert Bandit JSON -> SARIF', """
+        @echo off
+        "%PYTHON_BIN%" "reports\\security\\bandit_to_sarif.py"
         exit /b 0
     """.stripIndent())
 }
@@ -255,13 +259,15 @@ def readCoveragePercents() {
     return [linesPct, branchesPct]
 }
 
+/*
+ * JMeter: call Java directly to avoid brittle/corrupt .bat behavior on some installs.
+ */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        rem IMPORTANT: execute .bat with CALL so cmd returns properly
-        call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        java -jar "%JMETER_JAR%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
         set RC=%ERRORLEVEL%
 
         echo JMETER_RC=%RC%
@@ -305,7 +311,7 @@ pipeline {
 
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
 
-        JMETER_BIN = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\jmeter.bat'
+        JMETER_JAR = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\ApacheJMeter.jar'
         JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
         JMETER_JTL = 'reports\\performance\\jmeter.jtl'
 
@@ -436,7 +442,7 @@ pipeline {
             post {
                 always {
                     script {
-                        // Post must never kill the pipeline (enunciado: stages red but continue)
+                        // Post must never abort the pipeline: capture any post parsing issues.
                         catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                             banditJsonToSarif()
                             recordIssues(
