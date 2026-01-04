@@ -94,12 +94,12 @@ def runFlake8() {
 }
 
 def runBandit() {
-    runBat('Bandit (JSON+TXT+SARIF)', """
+    runBat('Bandit (JSON+TXT)', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m bandit -r app -f json  -o "%BANDIT_JSON%"
-        "%PYTHON_BIN%" -m bandit -r app -f txt   -o "%BANDIT_REPORT%"
-        "%PYTHON_BIN%" -m bandit -r app -f sarif -o "%BANDIT_SARIF%"
+        rem Bandit devuelve exit code != 0 si hay issues; NO queremos cortar aqui
+        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
+        "%PYTHON_BIN%" -m bandit -r app -f txt  -o "%BANDIT_REPORT%"
         exit /b 0
     """.stripIndent())
 }
@@ -165,10 +165,12 @@ def runJmeter() {
         @echo off
         if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
 
-        rem Patron robusto de cmd.exe para .bat con paths con espacios
-        cmd /c ""%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"" 
+        rem Importante: ejecutar .bat con CALL para que cmd no haga cosas raras
+        call "%JMETER_BIN%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        set RC=%ERRORLEVEL%
 
-        exit /b %ERRORLEVEL%
+        echo JMETER_RC=%RC%
+        exit /b %RC%
     """.stripIndent())
 }
 
@@ -339,12 +341,55 @@ pipeline {
 			post {
 				always {
 					recordIssues(
-						tools: [sarif(pattern: "${BANDIT_SARIF}")],
-						enabledForFailure: true
+						enabledForFailure: true,
+						tools: [
+							groovyParser(
+								id: 'bandit',
+								name: 'Bandit',
+								pattern: "${BANDIT_JSON}",
+								script: '''
+									import groovy.json.JsonSlurper
+									import edu.hm.hafner.analysis.IssueBuilder
+									import edu.hm.hafner.analysis.Severity
+			
+									def issues = []
+									def f = new File(filePath)
+									if (!f.exists()) {
+										return issues
+									}
+			
+									def data = new JsonSlurper().parseText(f.getText('UTF-8'))
+									def results = (data?.results ?: [])
+									results.each { r ->
+										def sevTxt = (r?.issue_severity ?: 'MEDIUM').toString().toUpperCase()
+										def severity = Severity.WARNING_NORMAL
+										if (sevTxt == 'HIGH') severity = Severity.WARNING_HIGH
+										if (sevTxt == 'LOW') severity = Severity.WARNING_LOW
+			
+										def fileName = (r?.filename ?: 'unknown').toString()
+										def line = (r?.line_number ?: 1) as int
+										def testId = (r?.test_id ?: 'BANDIT').toString()
+										def text = (r?.issue_text ?: 'Bandit issue').toString()
+			
+										issues << new IssueBuilder()
+											.setFileName(fileName)
+											.setLineStart(line)
+											.setCategory('security')
+											.setType('bandit')
+											.setSeverity(severity)
+											.setMessage("${testId}: ${text}")
+											.build()
+									}
+			
+									return issues
+								'''
+							)
+						]
 					)
-					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+			
+					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT}", fingerprint: true, allowEmptyArchive: true
 				}
-			}
+			}		
 		}
 
         stage('Performance') {
