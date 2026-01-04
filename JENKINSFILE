@@ -14,11 +14,6 @@ def prepWorkspace() {
         @echo off
         echo === Workspace info ===
 
-        rem cleanup of accidental literal env-var filenames
-        if exist "%%BANDIT_SARIF%%" del /q "%%BANDIT_SARIF%%" 1>nul 2>nul
-        if exist "%%BANDIT_JSON%%" del /q "%%BANDIT_JSON%%" 1>nul 2>nul
-        if exist "%%BANDIT_REPORT%%" del /q "%%BANDIT_REPORT%%" 1>nul 2>nul
-
         dir
         whoami
         hostname
@@ -109,10 +104,8 @@ def runBandit() {
 
 /*
  * Bandit JSON -> SARIF converter (robust on Windows/Jenkins):
- * - Does NOT rely on cmd %VAR% expansion inside Python strings
  * - Reads BANDIT_JSON and BANDIT_SARIF from environment variables
  * - Ensures output directory exists
- * - Returns errorlevel != 0 if Python fails
  */
 def banditJsonToSarif() {
     writeFile(
@@ -129,13 +122,7 @@ def write_empty():
     sarif = {
         "version": "2.1.0",
         "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "bandit",
-                    "informationUri": "https://bandit.readthedocs.io",
-                    "rules": []
-                }
-            },
+            "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": []}},
             "results": []
         }]
     }
@@ -165,11 +152,7 @@ for r in results_in:
     elif sev == "LOW":
         level = "note"
 
-    rules.setdefault(rid, {
-        "id": rid,
-        "name": rid,
-        "shortDescription": {"text": text}
-    })
+    rules.setdefault(rid, {"id": rid, "name": rid, "shortDescription": {"text": text}})
 
     results.append({
         "ruleId": rid,
@@ -186,13 +169,7 @@ for r in results_in:
 sarif = {
     "version": "2.1.0",
     "runs": [{
-        "tool": {
-            "driver": {
-                "name": "bandit",
-                "informationUri": "https://bandit.readthedocs.io",
-                "rules": list(rules.values())
-            }
-        },
+        "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": list(rules.values())}},
         "results": results
     }]
 }
@@ -214,7 +191,6 @@ sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
 
 def ensureBanditSarifExists() {
     if (!fileExists(env.BANDIT_SARIF)) {
-        // Minimal SARIF so recordIssues(sarif) never complains about missing file.
         writeFile(
             file: env.BANDIT_SARIF,
             text: '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"bandit","informationUri":"https://bandit.readthedocs.io","rules":[]}},"results":[]}]}'
@@ -230,7 +206,8 @@ def countFlake8Findings() {
         script: """
             @echo off
             if not exist "%FLAKE8_REPORT%" (echo 0 & exit /b 0)
-            for /f %%a in ('type "%FLAKE8_REPORT%" ^| find /c ":"') do @echo %%a
+            powershell -NoProfile -Command ^
+              "(Get-Content -Raw '%FLAKE8_REPORT%').Split([char]10) | %% { $_.Trim() } | ? { $_ -ne '' } | Measure-Object | Select-Object -ExpandProperty Count"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -250,7 +227,7 @@ def countBanditFindings() {
 }
 
 def readCoveragePercents() {
-    String out = bat(
+    String outLines = bat(
         label: 'Read coverage percents',
         returnStdout: true,
         script: """
@@ -261,7 +238,7 @@ def readCoveragePercents() {
         """.stripIndent()
     ).trim()
 
-    String out2 = bat(
+    String outBranches = bat(
         label: 'Read branch coverage percent',
         returnStdout: true,
         script: """
@@ -272,9 +249,9 @@ def readCoveragePercents() {
         """.stripIndent()
     ).trim()
 
-    def m = (out =~ /LINES=([0-9.]+)/)
+    def m = (outLines =~ /LINES=([0-9.]+)/)
     double linesPct = m ? m[0][1].toDouble() : 0.0
-    double branchesPct = out2 ? out2.toDouble() : 0.0
+    double branchesPct = outBranches ? outBranches.toDouble() : 0.0
 
     return [linesPct, branchesPct]
 }
@@ -334,7 +311,6 @@ pipeline {
 
         REPO_URL = 'https://github.com/alloci88/CP1.git'
         REPO_BRANCH = '*/master'
-        GIT_TOOL = 'Default'
     }
 
     stages {
@@ -346,16 +322,22 @@ pipeline {
                     branches: [[name: "${REPO_BRANCH}"]],
                     doGenerateSubmoduleConfigurations: false,
                     extensions: [],
-                    userRemoteConfigs: [[url: "${REPO_URL}"]],
-                    gitTool: "${GIT_TOOL}"
+                    userRemoteConfigs: [[url: "${REPO_URL}"]]
                 ])
                 prepWorkspace()
+
+                // Prepare for multi-agent: ship source to other nodes
+                stash name: 'SRC_STASH', includes: '**/*', useDefaultExcludes: false
             }
         }
 
         stage('Unit') {
             steps {
                 script {
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    prepWorkspace()
+
                     int rc = bat(returnStatus: true, label: 'Pytest Unit + Coverage', script: """
                         @echo off
                         call "${PYTHON_BIN}" -m coverage run --branch -m pytest --junitxml=${UNIT_JUNIT} test\\unit
@@ -364,12 +346,14 @@ pipeline {
                         call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
                         exit /b %EXITCODE%
                     """.stripIndent())
+
                     echo "Unit exit code: ${rc} (stage stays green by requirement)"
                 }
             }
             post {
                 always {
                     junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true
+                    stash name: 'REPORTS_STASH', includes: 'reports/**', useDefaultExcludes: false, allowEmpty: true
                 }
             }
         }
@@ -377,6 +361,10 @@ pipeline {
         stage('Rest') {
             steps {
                 script {
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    prepWorkspace()
+
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
 
@@ -392,6 +380,7 @@ pipeline {
                         "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
                         exit /b %ERRORLEVEL%
                     """.stripIndent())
+
                     echo "Rest exit code: ${rc} (stage stays green by requirement)"
                 }
             }
@@ -409,16 +398,20 @@ pipeline {
         stage('Static') {
             steps {
                 script {
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    prepWorkspace()
+
                     runFlake8()
                     int findings = countFlake8Findings().toInteger()
                     echo "Flake8 findings: ${findings}"
 
                     if (findings >= 10) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             error("Flake8 unhealthy: ${findings} >= 10")
                         }
                     } else if (findings >= 8) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             error("Flake8 unstable: ${findings} >= 8")
                         }
                     } else {
@@ -432,6 +425,7 @@ pipeline {
                         tools: [flake8(pattern: "${FLAKE8_REPORT}")],
                         enabledForFailure: true
                     )
+                    archiveArtifacts artifacts: "${FLAKE8_REPORT}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
@@ -439,16 +433,20 @@ pipeline {
         stage('Security Test (Bandit)') {
             steps {
                 script {
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    prepWorkspace()
+
                     runBandit()
                     int findings = countBanditFindings().toInteger()
                     echo "Bandit findings: ${findings}"
 
                     if (findings >= 4) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             error("Bandit unhealthy: ${findings} >= 4")
                         }
                     } else if (findings >= 2) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             error("Bandit unstable: ${findings} >= 2")
                         }
                     } else {
@@ -459,18 +457,14 @@ pipeline {
             post {
                 always {
                     script {
-                        // post must NEVER break the pipeline; only decorate results
                         catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                             int rc = banditJsonToSarif()
-                            // even if conversion failed or produced nothing, ensure file exists
                             ensureBanditSarifExists()
 
-                            // publish issues (now the file is guaranteed to exist)
                             recordIssues(
                                 enabledForFailure: true,
                                 tools: [sarif(pattern: "${BANDIT_SARIF}")]
                             )
-
                             echo "Bandit SARIF publish completed (converter rc=${rc})"
                         }
                     }
@@ -482,11 +476,15 @@ pipeline {
         stage('Performance') {
             steps {
                 script {
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    prepWorkspace()
+
                     killByPort(env.FLASK_PORT)
                     startFlask()
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
 
-                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                         runJmeter()
                     }
                 }
@@ -507,6 +505,12 @@ pipeline {
         stage('Coverage') {
             steps {
                 script {
+                    // Get reports generated by Unit (no re-run of pytest here)
+                    deleteDir()
+                    unstash 'SRC_STASH'
+                    unstash 'REPORTS_STASH'
+                    prepWorkspace()
+
                     def (double linesPct, double branchesPct) = readCoveragePercents()
                     echo "Coverage lines: ${linesPct}%"
                     echo "Coverage branches: ${branchesPct}%"
@@ -518,11 +522,11 @@ pipeline {
                     boolean branchesFail = (branchesPct < 80.0)
 
                     if (linesFail || branchesFail) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
                         }
                     } else if (linesUnstable || branchesUnstable) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
                         }
                     } else {
@@ -539,6 +543,13 @@ pipeline {
                     archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
+        }
+    }
+
+    post {
+        always {
+            // In multi-agent setups this prevents workspace bloat.
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
         }
     }
 }
