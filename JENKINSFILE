@@ -559,14 +559,29 @@ pipeline {
                 }
             }
             post {
-                always {
-                    recordCoverage(
-                        tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
-                        sourceCodeRetention: 'EVERY_BUILD'
-                    )
-                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
-                }
-            }
+				always {
+					script {
+						String savedResult = (currentBuild.result ?: 'SUCCESS')
+						try {
+							// Temporarily mask FAILURE so recordCoverage runs
+							if (savedResult == 'FAILURE') {
+								currentBuild.result = 'SUCCESS'
+								echo "Temporarily masking build result FAILURE -> SUCCESS to allow recordCoverage()"
+							}
+				
+							recordCoverage(
+								tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+								sourceCodeRetention: 'EVERY_BUILD'
+							)
+						} finally {
+							currentBuild.result = savedResult
+							echo "Restored build result to ${savedResult}"
+						}
+					}
+				
+					archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
+				}
+			}
         }
     }
 
