@@ -104,6 +104,29 @@ def runBandit() {
     """.stripIndent())
 }
 
+def banditJsonToSarif() {
+    runBat('Convert Bandit JSON -> SARIF', """
+        @echo off
+        if not exist "%BANDIT_JSON%" (
+            rem si no hay json, crea sarif vacio para que recordIssues no se queje
+            "%PYTHON_BIN%" -c "import json; open(r'%BANDIT_SARIF%','w',encoding='utf-8').write(json.dumps({'version':'2.1.0','$schema':'https://json.schemastore.org/sarif-2.1.0.json','runs':[{'tool':{'driver':{'name':'bandit','informationUri':'https://bandit.readthedocs.io','rules':[]}},'results':[]}]}, ensure_ascii=False))"
+            exit /b 0
+        )
+
+        "%PYTHON_BIN%" -c "import json, os; d=json.load(open(r'%BANDIT_JSON%','r',encoding='utf-8')); results=[]; rules={}; \
+			for r in d.get('results',[]): \
+			rid=str(r.get('test_id','BANDIT')); rules[rid]={'id':rid,'name':rid,'shortDescription':{'text':r.get('issue_text','Bandit issue')}}; \
+			file=r.get('filename','unknown'); line=int(r.get('line_number',1) or 1); \
+			sev=str(r.get('issue_severity','MEDIUM')).upper(); level='warning'; \
+			level = 'error' if sev=='HIGH' else ('note' if sev=='LOW' else 'warning'); \
+			msg=f\"{rid}: {r.get('issue_text','Bandit issue')}\"; \
+			results.append({'ruleId':rid,'level':level,'message':{'text':msg},'locations':[{'physicalLocation':{'artifactLocation':{'uri':file},'region':{'startLine':line}}}]}); \
+			sarif={'version':'2.1.0','$schema':'https://json.schemastore.org/sarif-2.1.0.json','runs':[{'tool':{'driver':{'name':'bandit','informationUri':'https://bandit.readthedocs.io','rules':list(rules.values())}},'results':results}]}; \
+			open(r'%BANDIT_SARIF%','w',encoding='utf-8').write(json.dumps(sarif, ensure_ascii=False))"
+        exit /b 0
+    """.stripIndent())
+}
+
 def countFlake8Findings() {
     return bat(
         label: 'Count Flake8 findings',
@@ -340,56 +363,16 @@ pipeline {
 			}
 			post {
 				always {
+					script {
+						banditJsonToSarif()
+					}
 					recordIssues(
 						enabledForFailure: true,
-						tools: [
-							groovyParser(
-								id: 'bandit',
-								name: 'Bandit',
-								pattern: "${BANDIT_JSON}",
-								script: '''
-									import groovy.json.JsonSlurper
-									import edu.hm.hafner.analysis.IssueBuilder
-									import edu.hm.hafner.analysis.Severity
-			
-									def issues = []
-									def f = new File(filePath)
-									if (!f.exists()) {
-										return issues
-									}
-			
-									def data = new JsonSlurper().parseText(f.getText('UTF-8'))
-									def results = (data?.results ?: [])
-									results.each { r ->
-										def sevTxt = (r?.issue_severity ?: 'MEDIUM').toString().toUpperCase()
-										def severity = Severity.WARNING_NORMAL
-										if (sevTxt == 'HIGH') severity = Severity.WARNING_HIGH
-										if (sevTxt == 'LOW') severity = Severity.WARNING_LOW
-			
-										def fileName = (r?.filename ?: 'unknown').toString()
-										def line = (r?.line_number ?: 1) as int
-										def testId = (r?.test_id ?: 'BANDIT').toString()
-										def text = (r?.issue_text ?: 'Bandit issue').toString()
-			
-										issues << new IssueBuilder()
-											.setFileName(fileName)
-											.setLineStart(line)
-											.setCategory('security')
-											.setType('bandit')
-											.setSeverity(severity)
-											.setMessage("${testId}: ${text}")
-											.build()
-									}
-			
-									return issues
-								'''
-							)
-						]
+						tools: [sarif(pattern: "${BANDIT_SARIF}")]
 					)
-			
-					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT}", fingerprint: true, allowEmptyArchive: true
+					archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
 				}
-			}		
+			}
 		}
 
         stage('Performance') {
