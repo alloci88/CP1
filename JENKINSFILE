@@ -256,7 +256,7 @@ pipeline {
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
 
         // Ajusta estas rutas a tu instalación real
-        JMETER_BIN = 'C:\\ci\\tools\\apache-jmeter-5.5\\bin\\jmeter.bat'
+        JMETER_BIN = C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\jmeter.bat'
         JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
         JMETER_JTL = 'reports\\performance\\jmeter.jtl'
 
