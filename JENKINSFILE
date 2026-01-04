@@ -225,8 +225,9 @@ def countFlake8Findings() {
         script: """
             @echo off
             if not exist "%FLAKE8_REPORT%" (echo 0 & exit /b 0)
-            powershell -NoProfile -Command ^
-              "$c=(Get-Content '%FLAKE8_REPORT%' | Where-Object { $_.Trim().Length -gt 0 } | Measure-Object).Count; Write-Output $c"
+
+            rem Count non-empty lines in flake8 report
+            for /f %%a in ('find /v /c "" ^< "%FLAKE8_REPORT%"') do @echo %%a
             exit /b 0
         """.stripIndent()
     ).trim()
