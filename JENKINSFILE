@@ -1,6 +1,6 @@
 /*
  * ==========================================================
- * CP1.2 Jenkinsfile (Windows) - "profesor style" + robusto
+ * CP1.2 Jenkinsfile (Windows) - Warnings-NG quality gates
  * ==========================================================
  *
  * - Flake8 y Bandit -> Warnings-NG con parser Pylint + qualityGates.
@@ -104,12 +104,12 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
 
 def startFlask() {
     runBat('Start Flask', """
-        @echoecho off
+        @echo off
         set PYTHONPATH=.
         set FLASK_APP=app\\api.py
         start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
         exit /b 0
-    """.stripIndent().replaceFirst('@echo off', '@echo off'))
+    """.stripIndent())
 }
 
 def startWiremock() {
@@ -130,10 +130,8 @@ def runFlake8Pylint() {
 }
 
 /*
- * FIX CRITICO:
- * - NO usar ${test_id} / ${msg} (Groovy lo interpreta y peta).
- * - Usar {test_id} / {msg} (Bandit placeholders reales).
- * - Usar triple comillas simples '''...''' para evitar interpolacion de Groovy.
+ * Bandit in pylint-like format:
+ * - Important: {test_id}/{msg} are bandit placeholders (NOT ${...} which Groovy would interpolate).
  */
 def runBanditPylintStyle() {
     runBat('Bandit', '''
@@ -154,6 +152,9 @@ def runJmeter() {
     """.stripIndent())
 }
 
+/*
+ * Build result escalator (SUCCESS < UNSTABLE < FAILURE)
+ */
 def setBuildResultWorst(String target) {
     String current = (currentBuild.result ?: 'SUCCESS')
     Map<String, Integer> rank = ['SUCCESS': 0, 'UNSTABLE': 1, 'FAILURE': 2]
@@ -168,6 +169,10 @@ def setBuildResultWorst(String target) {
     }
 }
 
+/*
+ * Coverage read (NO re-running unit tests allowed).
+ * Reads totals from coverage.json created in Unit stage.
+ */
 def readCoveragePercents() {
     String outLines = bat(
         label: 'Read coverage percent (lines)',
@@ -353,15 +358,18 @@ pipeline {
             }
             post {
                 always {
-                    recordIssues(
-                        id: 'flake8',
-                        enabledForFailure: true,
-                        tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
-                        qualityGates: [
-                            [threshold: 8, type: 'TOTAL', unstable: true],
-                            [threshold: 10, type: 'TOTAL', unstable: false]
-                        ]
-                    )
+                    // Importante: qualityGates aquí marcan UNSTABLE/FAILURE por TOTAL issues.
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        recordIssues(
+                            id: 'flake8',
+                            enabledForFailure: true,
+                            tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
+                            qualityGates: [
+                                [threshold: 8, type: 'TOTAL', unstable: true],
+                                [threshold: 10, type: 'TOTAL', unstable: false]
+                            ]
+                        )
+                    }
 
                     archiveArtifacts artifacts: "${FLAKE8_REPORT}", fingerprint: true, allowEmptyArchive: true
                 }
@@ -375,22 +383,22 @@ pipeline {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
-
-                    // Genera reports\\security\\bandit.out y bandit.json
                     runBanditPylintStyle()
                 }
             }
             post {
                 always {
-                    recordIssues(
-                        id: 'bandit',
-                        enabledForFailure: true,
-                        tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
-                        qualityGates: [
-                            [threshold: 2, type: 'TOTAL', unstable: true],
-                            [threshold: 4, type: 'TOTAL', unstable: false]
-                        ]
-                    )
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        recordIssues(
+                            id: 'bandit',
+                            enabledForFailure: true,
+                            tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
+                            qualityGates: [
+                                [threshold: 2, type: 'TOTAL', unstable: true],
+                                [threshold: 4, type: 'TOTAL', unstable: false]
+                            ]
+                        )
+                    }
 
                     archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
