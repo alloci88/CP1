@@ -1,17 +1,50 @@
 /*
- * =========================
- * Helper functions
- * =========================
+ * ==========================================================
+ * CP1.2 Jenkinsfile (Windows)
+ * ==========================================================
+ *
+ * Objetivos (enunciado/guia):
+ * - Stages: Get Code, Unit, Rest, Static, Security, Performance, Coverage
+ * - Unit y Rest: siempre VERDES (aunque fallen tests).
+ * - Static/Security/Coverage: aplicar umbrales, pero el pipeline debe CONTINUAR siempre.
+ * - Unit tests: SOLO se ejecutan UNA vez en TODO el pipeline.
+ * - Publicar resultados en cada etapa (sin etapa "Results").
+ * - Preparado para Reto 2: whoami/hostname/workspace en CADA etapa + stash/unstash.
+ *
+ * Nota:
+ * - Flake8 y Bandit se formatean para que Warnings-NG los lea con parser "Pylint"
+ *   (como el profesor), y se aplican qualityGates ahí (menos Groovy, más plugin).
+ * - Bandit NO usa SARIF (más limpio). Se usa -f custom + --msg-template para producir
+ *   un output estilo pylint.
+ *
  * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
  */
 
+/* =========================
+ * Helper functions
+ * ========================= */
+
+/** Ejecuta un comando batch con etiqueta clara en log */
 def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
-/*
- * Minimal per-stage prep: only ensure report folders exist.
+/**
+ * Reto 2: En cada etapa deben aparecer whoami/hostname/workspace.
+ * (Si agentes comparten usuario, WORKSPACE ayuda a distinguir).
  */
+def logAgentInfo(String stageName) {
+    runBat("Agent info (${stageName})", """
+        @echo off
+        echo === Agent info: ${stageName} ===
+        whoami
+        hostname
+        echo %WORKSPACE%
+        exit /b 0
+    """.stripIndent())
+}
+
+/** Crea estructura de carpetas de reports (idempotente). */
 def ensureReportsDirs() {
     runBat('Ensure reports dirs', """
         @echo off
@@ -26,9 +59,7 @@ def ensureReportsDirs() {
     """.stripIndent())
 }
 
-/*
- * Verbose info only once (required by enunciado).
- */
+/** Log verboso SOLO una vez (útil para Reto 1). */
 def prepWorkspaceVerbose() {
     runBat('Workspace info (verbose)', """
         @echo off
@@ -42,6 +73,7 @@ def prepWorkspaceVerbose() {
     """.stripIndent())
 }
 
+/** Verifica Wiremock JAR. */
 def checkWiremockJar() {
     runBat('Check Wiremock jar', """
         @echo off
@@ -50,6 +82,7 @@ def checkWiremockJar() {
     """.stripIndent())
 }
 
+/** Verifica JMeter (jar). */
 def checkJmeterJar() {
     runBat('Check JMeter', """
         @echo off
@@ -58,6 +91,10 @@ def checkJmeterJar() {
     """.stripIndent())
 }
 
+/**
+ * Mata el proceso que esté escuchando en un puerto concreto.
+ * Evita flakiness por servicios "huérfanos" de ejecuciones previas.
+ */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
@@ -68,9 +105,9 @@ def killByPort(String port) {
     """.stripIndent())
 }
 
-/*
- * IMPORTANT: avoid Groovy "$" interpolation issues inside bat strings.
- * We build the script with .replace(...) and keep "^200$" literal.
+/**
+ * Espera hasta recibir HTTP 200 en una URL (healthcheck).
+ * Reduce flakiness por arranque asíncrono de Flask/Wiremock.
  */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label,
@@ -90,6 +127,7 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     )
 }
 
+/** Arranca Flask en background. */
 def startFlask() {
     runBat('Start Flask', """
         @echo off
@@ -100,6 +138,7 @@ def startFlask() {
     """.stripIndent())
 }
 
+/** Arranca Wiremock en background. */
 def startWiremock() {
     runBat('Start Wiremock', """
         @echo off
@@ -108,27 +147,38 @@ def startWiremock() {
     """.stripIndent())
 }
 
-def runFlake8() {
+/**
+ * Flake8 en formato parseable por Warnings-NG usando parser Pylint:
+ * - --exit-zero: siempre exit 0 (pipeline sigue)
+ * - --format=pylint: salida "path:line:col: code msg" (compatible con Pylint parser)
+ */
+def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        rem flake8 returns non-zero when issues exist; do NOT fail here
-        "%PYTHON_BIN%" -m flake8 app test --format=default > "%FLAKE8_REPORT%"
+        "%PYTHON_BIN%" -m flake8 app test --exit-zero --format=pylint > "%FLAKE8_REPORT%"
         exit /b 0
     """.stripIndent())
 }
 
-def runBandit() {
+/**
+ * Bandit "profesor style" para Warnings-NG:
+ * - --exit-zero: siempre exit 0 (pipeline sigue)
+ * - -f custom + --msg-template: emitimos líneas estilo pylint
+ *   Formato resultante: "<path>:<line>: [<test_id>] <msg>"
+ * - Lo parseamos con parser Pylint (pyLint tool) en Warnings-NG.
+ */
+def runBanditPylintStyle() {
     runBat('Bandit', """
         @echo off
         set PYTHONPATH=.
-        rem bandit may return non-zero when issues exist; do NOT fail here
-        "%PYTHON_BIN%" -m bandit -r app -f json -o "%BANDIT_JSON%"
-        "%PYTHON_BIN%" -m bandit -r app -f txt  -o "%BANDIT_REPORT%"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f json   -o "%BANDIT_JSON%"
         exit /b 0
     """.stripIndent())
 }
 
+/** Ejecuta JMeter (no-GUI) usando el test plan .jmx y genera .jtl. */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
@@ -138,8 +188,9 @@ def runJmeter() {
     """.stripIndent())
 }
 
-/*
- * Build result escalator (SUCCESS < UNSTABLE < FAILURE)
+/**
+ * Escalador de estado del build:
+ * mantiene el "peor" resultado entre stages independientes.
  */
 def setBuildResultWorst(String target) {
     String current = (currentBuild.result ?: 'SUCCESS')
@@ -155,35 +206,9 @@ def setBuildResultWorst(String target) {
     }
 }
 
-def countFlake8Findings() {
-    return bat(
-        label: 'Count Flake8 findings',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%FLAKE8_REPORT%" (echo 0 & exit /b 0)
-            for /f %%a in ('find /v /c "" ^< "%FLAKE8_REPORT%"') do @echo %%a
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-}
-
-def countBanditFindings() {
-    return bat(
-        label: 'Count Bandit findings (JSON)',
-        returnStdout: true,
-        script: """
-            @echo off
-            if not exist "%BANDIT_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%BANDIT_JSON%')); print(len(d.get('results',[])))"
-            exit /b 0
-        """.stripIndent()
-    ).trim()
-}
-
-/*
- * Coverage read (NO re-running unit tests allowed).
- * Reads totals from coverage.json created in Unit stage.
+/**
+ * Lee porcentajes desde coverage.json (creado en Unit).
+ * NO se re-ejecutan unit tests (requisito del enunciado).
  */
 def readCoveragePercents() {
     String outLines = bat(
@@ -213,107 +238,16 @@ def readCoveragePercents() {
     return [linesPct, branchesPct]
 }
 
-/*
- * Bandit JSON -> SARIF (so warnings-ng can chart "Security")
- */
-def banditJsonToSarif() {
-    writeFile(
-        file: 'reports\\security\\bandit_to_sarif.py',
-        text: '''
-import json
-import os
-from pathlib import Path
-
-bandit_json = Path(os.environ.get("BANDIT_JSON", "reports\\\\security\\\\bandit.json"))
-sarif_path  = Path(os.environ.get("BANDIT_SARIF", "reports\\\\security\\\\bandit.sarif"))
-
-def write_empty():
-    sarif = {
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": []}},
-            "results": []
-        }]
-    }
-    sarif_path.parent.mkdir(parents=True, exist_ok=True)
-    sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
-
-if not bandit_json.exists():
-    write_empty()
-    raise SystemExit(0)
-
-data = json.loads(bandit_json.read_text(encoding="utf-8"))
-results_in = data.get("results", []) or []
-
-rules = {}
-results = []
-
-for r in results_in:
-    rid = str(r.get("test_id") or "BANDIT")
-    text = str(r.get("issue_text") or "Bandit issue")
-    file_name = str(r.get("filename") or "unknown")
-    line = int(r.get("line_number") or 1)
-
-    sev = str(r.get("issue_severity") or "MEDIUM").upper()
-    level = "warning"
-    if sev == "HIGH":
-        level = "error"
-    elif sev == "LOW":
-        level = "note"
-
-    rules.setdefault(rid, {"id": rid, "name": rid, "shortDescription": {"text": text}})
-
-    results.append({
-        "ruleId": rid,
-        "level": level,
-        "message": {"text": f"{rid}: {text}"},
-        "locations": [{
-            "physicalLocation": {
-                "artifactLocation": {"uri": file_name},
-                "region": {"startLine": line}
-            }
-        }]
-    })
-
-sarif = {
-    "version": "2.1.0",
-    "runs": [{
-        "tool": {"driver": {"name": "bandit", "informationUri": "https://bandit.readthedocs.io", "rules": list(rules.values())}},
-        "results": results
-    }]
-}
-
-sarif_path.parent.mkdir(parents=True, exist_ok=True)
-sarif_path.write_text(json.dumps(sarif, ensure_ascii=False), encoding="utf-8")
-'''.stripIndent()
-    )
-
-    int rc = bat(returnStatus: true, label: 'Convert Bandit JSON -> SARIF', script: """
-        @echo off
-        "%PYTHON_BIN%" "reports\\security\\bandit_to_sarif.py"
-        exit /b %ERRORLEVEL%
-    """.stripIndent())
-
-    echo "Bandit SARIF converter exit code: ${rc}"
-    return rc
-}
-
-def ensureBanditSarifExists() {
-    if (!fileExists(env.BANDIT_SARIF)) {
-        writeFile(
-            file: env.BANDIT_SARIF,
-            text: '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"bandit","informationUri":"https://bandit.readthedocs.io","rules":[]}},"results":[]}]}'
-        )
-        echo "Bandit SARIF missing; created minimal fallback at ${env.BANDIT_SARIF}"
-    }
-}
+/* =========================
+ * Pipeline
+ * ========================= */
 
 pipeline {
     agent any
 
     options {
         timestamps()
-        skipDefaultCheckout(true)
+        skipDefaultCheckout(true)  // hacemos checkout en "Get Code" manualmente
     }
 
     environment {
@@ -332,11 +266,10 @@ pipeline {
         COVERAGE_XML = 'reports\\coverage\\coverage.xml'
         COVERAGE_JSON = 'reports\\coverage\\coverage.json'
 
-        FLAKE8_REPORT = 'reports\\static\\flake8.txt'
+        FLAKE8_REPORT = 'reports\\static\\flake8.out'
 
+        BANDIT_OUT = 'reports\\security\\bandit.out'
         BANDIT_JSON = 'reports\\security\\bandit.json'
-        BANDIT_REPORT = 'reports\\security\\bandit.txt'
-        BANDIT_SARIF = 'reports\\security\\bandit.sarif'
 
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
@@ -355,6 +288,8 @@ pipeline {
 
         stage('Get Code') {
             steps {
+                logAgentInfo('Get Code')
+
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: "${REPO_BRANCH}"]],
@@ -364,6 +299,7 @@ pipeline {
                 prepWorkspaceVerbose()
                 ensureReportsDirs()
 
+                // Stash del código para stages posteriores (y Reto 2 con agentes).
                 stash name: 'SRC',
                       includes: '**/*',
                       excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
@@ -372,10 +308,16 @@ pipeline {
         }
 
         /*
-         * Unit must be GREEN always (even if tests fail), and run only once.
+         * Unit: se ejecuta UNA sola vez en todo el pipeline.
+         * Además, aquí generamos coverage.xml y coverage.json para usar luego sin re-ejecutar tests.
+         *
+         * Requisito: siempre VERDE aunque fallen tests.
+         * - No fallamos el stage por exit code de pytest (capturamos returnStatus).
+         * - Y el step junit no marca build unstable (skipMarkingBuildUnstable).
          */
         stage('Unit') {
             steps {
+                logAgentInfo('Unit')
                 script {
                     deleteDir()
                     unstash 'SRC'
@@ -385,7 +327,7 @@ pipeline {
                         @echo off
                         call "${PYTHON_BIN}" -m coverage run --branch -m pytest --junitxml=${UNIT_JUNIT} test\\unit
                         set EXITCODE=%ERRORLEVEL%
-                        call "${PYTHON_BIN}" -m coverage xml -o ${COVERAGE_XML}
+                        call "${PYTHON_BIN}" -m coverage xml  -o ${COVERAGE_XML}
                         call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
                         exit /b %EXITCODE%
                     """.stripIndent())
@@ -395,29 +337,39 @@ pipeline {
             }
             post {
                 always {
-                    junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true
+                    // Publica tests sin marcar UNSTABLE si hay fallos (requisito: stage siempre verde).
+                    junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
 
+                    // Publica cobertura para la gráfica de Coverage plugin.
                     recordCoverage(
                         tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
                         sourceCodeRetention: 'EVERY_BUILD'
                     )
 
-                    stash name: 'REPORTS', includes: 'reports/**', allowEmpty: true, useDefaultExcludes: false
+                    // Stash de reports (incluye coverage.xml/json) para Coverage stage o agentes.
+                    stash name: 'REPORTS',
+                          includes: 'reports/**',
+                          allowEmpty: true,
+                          useDefaultExcludes: false
                 }
             }
         }
 
         /*
-         * Rest must be GREEN always (even if tests fail).
+         * Rest (integración): igual que CP1.1.
+         * Requisito: siempre VERDE aunque fallen tests.
          */
         stage('Rest') {
             steps {
+                logAgentInfo('Rest')
                 script {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
 
                     checkWiremockJar()
+
+                    // Limpiar puertos por si quedaron procesos colgados
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
 
@@ -443,114 +395,114 @@ pipeline {
                         killByPort(env.FLASK_PORT)
                         killByPort(env.WIREMOCK_PORT)
                     }
-                    junit testResults: "${REST_JUNIT}", allowEmptyResults: true
+
+                    // Igual que Unit: publicar sin marcar build unstable por fallos de tests.
+                    junit testResults: "${REST_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
                 }
             }
         }
 
         /*
-         * Static (flake8) gates:
-         * - >= 8  => UNSTABLE (yellow)
-         * - >= 10 => FAILURE (red)
-         * Pipeline must continue.
+         * Static (flake8):
+         * - Ejecutamos flake8 en formato "pylint" para Warnings-NG.
+         * - Quality gates (guia):
+         *   >=8  => UNSTABLE
+         *   >=10 => FAILURE
+         * - Pipeline debe continuar SIEMPRE (aunque quede rojo).
+         *
+         * Implementación:
+         * - flake8 --exit-zero evita fallar el comando
+         * - recordIssues + qualityGates marca estado del stage/build automáticamente
          */
         stage('Static') {
             steps {
+                logAgentInfo('Static')
                 script {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
-
-                    runFlake8()
-                    int findings = countFlake8Findings().toInteger()
-                    echo "Flake8 findings: ${findings}"
-
-                    if (findings >= 10) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Flake8 unhealthy: ${findings} >= 10")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (findings >= 8) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Flake8 unstable: ${findings} >= 8")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Flake8 OK (<8)"
-                    }
+                    runFlake8Pylint()
                 }
             }
             post {
                 always {
-                    recordIssues(tools: [flake8(pattern: "${FLAKE8_REPORT}")], enabledForFailure: true)
+                    // Parser Pylint leyendo salida de flake8 en formato pylint.
+                    recordIssues(
+                        enabledForFailure: true,
+                        tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
+                        qualityGates: [
+                            // >=8 -> UNSTABLE
+                            [threshold: 8, type: 'TOTAL', unstable: true],
+                            // >=10 -> FAILURE
+                            [threshold: 10, type: 'TOTAL', unstable: false]
+                        ]
+                    )
+
                     archiveArtifacts artifacts: "${FLAKE8_REPORT}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
 
         /*
-         * Security (bandit) gates:
-         * - >= 2  => UNSTABLE (yellow)
-         * - >= 4  => FAILURE (red)
-         * Pipeline must continue.
+         * Security (bandit):
+         * - Bandit genera bandit.out estilo pylint (custom + msg-template)
+         * - Warnings-NG parsea con parser Pylint y aplica quality gates:
+         *   >=2 -> UNSTABLE
+         *   >=4 -> FAILURE
+         * - Pipeline debe continuar siempre.
          */
         stage('Security') {
             steps {
+                logAgentInfo('Security')
                 script {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
-
-                    runBandit()
-                    int findings = countBanditFindings().toInteger()
-                    echo "Bandit findings: ${findings}"
-
-                    if (findings >= 4) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Bandit unhealthy: ${findings} >= 4")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (findings >= 2) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Bandit unstable: ${findings} >= 2")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Bandit OK (<2)"
-                    }
+                    runBanditPylintStyle()
                 }
             }
             post {
                 always {
-                    script {
-                        int rc = banditJsonToSarif()
-                        ensureBanditSarifExists()
-                        echo "Bandit SARIF publish completed (converter rc=${rc})"
-                    }
-                    recordIssues(tools: [sarif(pattern: "${BANDIT_SARIF}")], enabledForFailure: true)
-                    archiveArtifacts artifacts: "${BANDIT_JSON},${BANDIT_REPORT},${BANDIT_SARIF}", fingerprint: true, allowEmptyArchive: true
+                    recordIssues(
+                        enabledForFailure: true,
+                        tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
+                        qualityGates: [
+                            // >=2 -> UNSTABLE
+                            [threshold: 2, type: 'TOTAL', unstable: true],
+                            // >=4 -> FAILURE
+                            [threshold: 4, type: 'TOTAL', unstable: false]
+                        ]
+                    )
+
+                    archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
 
         /*
          * Performance (JMeter):
-         * - flask must be up
-         * - run test plan and publish via perfReport
-         * (Coloring is driven by perfReport thresholds; enunciado doesn't define extra gates.)
+         * - Flask debe estar levantado para que JMeter pueda atacar suma/resta.
+         * - Ejecutamos JMeter no-GUI y publicamos con plugin Performance.
+         *
+         * Nota: el build puede quedar FAILURE por otras etapas (Static/Coverage),
+         * pero Performance debe ejecutarse igualmente.
          */
         stage('Performance') {
             steps {
+                logAgentInfo('Performance')
                 script {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
 
                     checkJmeterJar()
+
+                    // Flask para JMeter (Wiremock no necesario para suma/resta)
                     killByPort(env.FLASK_PORT)
                     startFlask()
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
 
+                    // Si JMeter falla, marcamos stage FAILURE, pero el pipeline sigue.
                     catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                         runJmeter()
                     }
@@ -558,8 +510,11 @@ pipeline {
             }
             post {
                 always {
-                    script { killByPort(env.FLASK_PORT) }
+                    script {
+                        killByPort(env.FLASK_PORT)
+                    }
 
+                    // Publica JTL en plugin Performance (gráficas, percentiles, etc.)
                     perfReport(
                         sourceDataFiles: "${JMETER_JTL}",
                         errorUnstableThreshold: 1,
@@ -573,21 +528,21 @@ pipeline {
         }
 
         /*
-         * Coverage gates (NO rerun of unit tests allowed):
-         * Lines:
-         * - 85..95 => UNSTABLE
-         * - >95    => GREEN
-         * - <85    => FAILURE
-         * Branches:
-         * - 80..90 => UNSTABLE
-         * - >90    => GREEN
-         * - <80    => FAILURE
-         * Pipeline must continue.
+         * Coverage:
+         * - NO se vuelven a ejecutar unit tests (requisito).
+         * - Leemos coverage.json generado en Unit.
+         * - Aplicamos umbrales guía:
+         *   Lines: 85..95 UNSTABLE, >95 GREEN, <85 FAILURE
+         *   Branches: 80..90 UNSTABLE, >90 GREEN, <80 FAILURE
+         * - Pipeline debe continuar siempre.
          */
         stage('Coverage') {
             steps {
+                logAgentInfo('Coverage')
                 script {
                     deleteDir()
+
+                    // Solo necesitamos los reports generados en Unit (coverage.json)
                     unstash 'REPORTS'
                     ensureReportsDirs()
 
@@ -626,6 +581,7 @@ pipeline {
 
     post {
         always {
+            // Limpieza final del workspace (buena práctica + Reto 2)
             cleanWs(deleteDirs: true)
         }
     }
