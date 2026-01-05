@@ -1,78 +1,503 @@
+/*
+ * ==========================================================
+ * CP1.2 JENKINSFILE_agentes (Windows) - 3 agents + parallel
+ * ==========================================================
+ *
+ * - 3 agents: primary, static-sec, qa-perf (change labels)
+ * - Parallel where possible (SRC via stash/unstash)
+ * - Unit/Rest always green (by requirement)
+ * - Coverage computed from coverage.json (NO re-run unit tests)
+ * - Flake8 & Bandit -> Warnings-NG quality gates
+ * - whoami/hostname/workspace in every stage
+ *
+ * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
+ */
+
+/* =========================
+ * Helper functions
+ * ========================= */
+
+def runBat(String label, String script) {
+    bat(label: label, script: script)
+}
+
+def logAgentInfo(String stageName) {
+    runBat("Agent info (${stageName})", """
+        @echo off
+        echo === Agent info: ${stageName} ===
+        whoami
+        hostname
+        echo %WORKSPACE%
+        exit /b 0
+    """.stripIndent())
+}
+
+def ensureReportsDirs() {
+    runBat('Ensure reports dirs', """
+        @echo off
+        if not exist "%REPORTS_DIR%" mkdir "%REPORTS_DIR%"
+        if not exist "%REPORTS_UNIT_DIR%" mkdir "%REPORTS_UNIT_DIR%"
+        if not exist "%REPORTS_REST_DIR%" mkdir "%REPORTS_REST_DIR%"
+        if not exist "%REPORTS_STATIC_DIR%" mkdir "%REPORTS_STATIC_DIR%"
+        if not exist "%REPORTS_SECURITY_DIR%" mkdir "%REPORTS_SECURITY_DIR%"
+        if not exist "%REPORTS_COVERAGE_DIR%" mkdir "%REPORTS_COVERAGE_DIR%"
+        if not exist "%REPORTS_PERFORMANCE_DIR%" mkdir "%REPORTS_PERFORMANCE_DIR%"
+        exit /b 0
+    """.stripIndent())
+}
+
+def prepWorkspaceVerbose() {
+    runBat('Workspace info (verbose)', """
+        @echo off
+        echo === Workspace info ===
+        whoami
+        hostname
+        echo %WORKSPACE%
+        echo === Python ===
+        "%PYTHON_BIN%" --version
+        exit /b 0
+    """.stripIndent())
+}
+
+def checkWiremockJar() {
+    runBat('Check Wiremock jar', """
+        @echo off
+        if exist "%WIREMOCK_JAR%" (echo Wiremock OK) else (echo Wiremock MISSING & exit /b 1)
+        exit /b 0
+    """.stripIndent())
+}
+
+def checkJmeterJar() {
+    runBat('Check JMeter', """
+        @echo off
+        if exist "%JMETER_JAR%" (echo JMeter OK) else (echo JMeter MISSING & exit /b 1)
+        exit /b 0
+    """.stripIndent())
+}
+
+def killByPort(String port) {
+    runBat("Stop processes on ${port}", """
+        @echo off
+        for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":${port} .*LISTENING"') do (
+            taskkill /F /PID %%p 1>nul 2>nul
+        )
+        exit /b 0
+    """.stripIndent())
+}
+
+def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
+    runBat(label,
+        '''
+        @echo off
+        for /L %%i in (1,1,%MAX_TRIES%) do (
+            powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing '%URL%' -TimeoutSec %TIMEOUT%).StatusCode } catch { 0 }" ^
+                | findstr "^200$" >nul && exit /b 0
+            ping -n 2 127.0.0.1 >nul
+        )
+        exit /b 1
+        '''
+        .replace('%URL%', url)
+        .replace('%MAX_TRIES%', maxTries.toString())
+        .replace('%TIMEOUT%', timeoutSec.toString())
+        .stripIndent()
+    )
+}
+
+def startFlask() {
+    runBat('Start Flask', """
+        @echo off
+        set PYTHONPATH=.
+        set FLASK_APP=app\\api.py
+        start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
+        exit /b 0
+    """.stripIndent())
+}
+
+def startWiremock() {
+    runBat('Start Wiremock', """
+        @echo off
+        start "" /B java -jar "%WIREMOCK_JAR%" --port %WIREMOCK_PORT% --root-dir test\\wiremock
+        exit /b 0
+    """.stripIndent())
+}
+
+def runFlake8Pylint() {
+    runBat('Flake8', """
+        @echo off
+        set PYTHONPATH=.
+        "%PYTHON_BIN%" -m flake8 app test --exit-zero --format=pylint > "%FLAKE8_REPORT%"
+        exit /b 0
+    """.stripIndent())
+}
+
+/*
+ * Bandit in pylint-like format:
+ * - Important: {test_id}/{msg} are bandit placeholders (NOT ${...} which Groovy would interpolate).
+ */
+def runBanditPylintStyle() {
+    runBat('Bandit', '''
+        @echo off
+        set PYTHONPATH=.
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f json   -o "%BANDIT_JSON%"
+        exit /b 0
+    '''.stripIndent())
+}
+
+def runJmeter() {
+    runBat('JMeter', """
+        @echo off
+        if exist "%JMETER_JTL%" del /q "%JMETER_JTL%" 1>nul 2>nul
+        java -jar "%JMETER_JAR%" -n -t "%JMETER_TESTPLAN%" -l "%JMETER_JTL%"
+        exit /b %ERRORLEVEL%
+    """.stripIndent())
+}
+
+/*
+ * Build result escalator (SUCCESS < UNSTABLE < FAILURE)
+ */
+def setBuildResultWorst(String target) {
+    String current = (currentBuild.result ?: 'SUCCESS')
+    Map<String, Integer> rank = ['SUCCESS': 0, 'UNSTABLE': 1, 'FAILURE': 2]
+    int curRank = rank.containsKey(current) ? rank[current] : 0
+    int tgtRank = rank.containsKey(target) ? rank[target] : 0
+
+    if (tgtRank > curRank) {
+        currentBuild.result = target
+        echo "Build result escalated: ${current} -> ${target}"
+    } else {
+        echo "Build result unchanged: ${current} (requested ${target})"
+    }
+}
+
+/*
+ * Coverage read (NO re-running unit tests allowed).
+ * Reads totals from coverage.json created in Unit stage.
+ */
+def readCoveragePercents() {
+    String outLines = bat(
+        label: 'Read coverage percent (lines)',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"{t.get('percent_covered',0):.2f}\\\")"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    String outBranches = bat(
+        label: 'Read coverage percent (branches)',
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    double linesPct = outLines ? outLines.toDouble() : 0.0
+    double branchesPct = outBranches ? outBranches.toDouble() : 0.0
+    return [linesPct, branchesPct]
+}
+
+/* =========================
+ * Pipeline
+ * ========================= */
+
 pipeline {
-    agent any
+    agent none
 
-    options { skipDefaultCheckout() }
+    options {
+        timestamps()
+        skipDefaultCheckout(true)
+    }
 
-     stages {
+    environment {
+        // CHANGE LABELS TO YOUR REAL NODE LABELS
+        PRIMARY_AGENT_LABEL = 'primary'
+        STATIC_SECURITY_AGENT_LABEL = 'static-sec'
+        QA_PERF_AGENT_LABEL = 'qa-perf'
+
+        PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
+
+        REPORTS_DIR = 'reports'
+        REPORTS_UNIT_DIR = 'reports\\unit'
+        REPORTS_REST_DIR = 'reports\\rest'
+        REPORTS_STATIC_DIR = 'reports\\static'
+        REPORTS_SECURITY_DIR = 'reports\\security'
+        REPORTS_COVERAGE_DIR = 'reports\\coverage'
+        REPORTS_PERFORMANCE_DIR = 'reports\\performance'
+
+        UNIT_JUNIT = 'reports\\unit\\result-unit.xml'
+        REST_JUNIT = 'reports\\rest\\result-rest.xml'
+        COVERAGE_XML = 'reports\\coverage\\coverage.xml'
+        COVERAGE_JSON = 'reports\\coverage\\coverage.json'
+
+        FLAKE8_REPORT = 'reports\\static\\flake8.out'
+
+        BANDIT_OUT = 'reports\\security\\bandit.out'
+        BANDIT_JSON = 'reports\\security\\bandit.json'
+
+        FLASK_PORT = '5000'
+        WIREMOCK_PORT = '9090'
+
+        WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
+
+        JMETER_JAR = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\ApacheJMeter.jar'
+        JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
+        JMETER_JTL = 'reports\\performance\\jmeter.jtl'
+
+        REPO_URL = 'https://github.com/alloci88/CP1.git'
+        REPO_BRANCH = '*/master'
+    }
+
+    stages {
+
         stage('Get Code') {
+            agent { label "${PRIMARY_AGENT_LABEL}" }
             steps {
-                // Obtener código del repo
-                git 'https://github.com/anieto-unir/helloworld.git'
-	            echo WORKSPACE
-                bat 'dir'
-                stash name:'code', includes:'**'
+                logAgentInfo('Get Code')
+
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${REPO_BRANCH}"]],
+                    userRemoteConfigs: [[url: "${REPO_URL}"]]
+                ])
+
+                prepWorkspaceVerbose()
+                ensureReportsDirs()
+
+                stash name: 'SRC',
+                      includes: '**/*',
+                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
+                      useDefaultExcludes: false
             }
         }
-    
-        stage('Build') {
-           steps {
-              echo 'Eyyy, esto es Python. No hay que compilar nada!!!'
-           }
-        }
-        
-        stage('Tests')
-        {
-            parallel
-            {
+
+        stage('Parallel QA') {
+            parallel {
+
                 stage('Unit') {
-                    agent {label 'agent1'}
+                    agent { label "${PRIMARY_AGENT_LABEL}" }
                     steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            unstash name:'code'
-                            sh '''
-                                ls -la
-                                export PYTHONPATH=${WORKSPACE}
-                                /home/agent1/.local/bin/pytest --junitxml=result-unit.xml test/unit
-                            '''
-                            stash name:'unit-res', includes:'result-unit.xml'
-                       }
+                        logAgentInfo('Unit')
+                        script {
+                            deleteDir()
+                            unstash 'SRC'
+                            ensureReportsDirs()
+
+                            int rc = bat(returnStatus: true, label: 'Pytest Unit + Coverage', script: """
+                                @echo off
+                                call "${PYTHON_BIN}" -m coverage run --branch -m pytest --junitxml=${UNIT_JUNIT} test\\unit
+                                set EXITCODE=%ERRORLEVEL%
+                                call "${PYTHON_BIN}" -m coverage xml  -o ${COVERAGE_XML}
+                                call "${PYTHON_BIN}" -m coverage json -o ${COVERAGE_JSON}
+                                exit /b %EXITCODE%
+                            """.stripIndent())
+
+                            echo "Unit exit code: ${rc} (stage stays green by requirement)"
+                        }
                     }
-                }   
-                
-                
-                stage('Rest') {
-                    agent {label 'agent2'}
+                    post {
+                        always {
+                            junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
+
+                            recordCoverage(
+                                tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+                                sourceCodeRetention: 'EVERY_BUILD'
+                            )
+
+                            // Reports for later Coverage stage
+                            stash name: 'REPORTS',
+                                  includes: 'reports/**',
+                                  allowEmpty: true,
+                                  useDefaultExcludes: false
+                        }
+                    }
+                }
+
+                stage('Static + Security') {
+                    agent { label "${STATIC_SECURITY_AGENT_LABEL}" }
                     steps {
-                      catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                        unstash name:'code'
-                        sh '''
-                            export FLASK_APP=app/api.py                          
-                            /home/agent2/.local/bin/flask run &
+                        logAgentInfo('Static+Security')
+                        script {
+                            deleteDir()
+                            unstash 'SRC'
+                            ensureReportsDirs()
 
-                            sleep 4
+                            // Static
+                            runFlake8Pylint()
 
-                            java -jar /home/agent2/wiremock/wiremock-standalone-3.3.1.jar --port 9090 --root-dir /home/agent2/wiremock &
-                            export PYTHONPATH=${WORKSPACE}
-                            
-                            sleep 15
-                            
-                            /home/agent2/.local/bin/pytest --junitxml=result-rest.xml test/rest
-                        '''
-                      }
-                      stash name:'rest-res', includes:'result-rest.xml'
-                    }    
-                }                
-                
+                            // Security
+                            runBanditPylintStyle()
+                        }
+                    }
+                    post {
+                        always {
+                            // Flake8 gates: >=8 unstable, >=10 failure. Continue pipeline always.
+                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                recordIssues(
+                                    id: 'flake8',
+                                    enabledForFailure: true,
+                                    tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
+                                    qualityGates: [
+                                        [threshold: 8, type: 'TOTAL', unstable: true],
+                                        [threshold: 10, type: 'TOTAL', unstable: false]
+                                    ]
+                                )
+                            }
+
+                            // Bandit gates: >=2 unstable, >=4 failure. Continue pipeline always.
+                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                recordIssues(
+                                    id: 'bandit',
+                                    enabledForFailure: true,
+                                    tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
+                                    qualityGates: [
+                                        [threshold: 2, type: 'TOTAL', unstable: true],
+                                        [threshold: 4, type: 'TOTAL', unstable: false]
+                                    ]
+                                )
+                            }
+
+                            archiveArtifacts artifacts: "${FLAKE8_REPORT},${BANDIT_OUT},${BANDIT_JSON}",
+                                             fingerprint: true,
+                                             allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('Rest + Performance') {
+                    agent { label "${QA_PERF_AGENT_LABEL}" }
+                    stages {
+
+                        stage('Rest') {
+                            steps {
+                                logAgentInfo('Rest')
+                                script {
+                                    deleteDir()
+                                    unstash 'SRC'
+                                    ensureReportsDirs()
+
+                                    checkWiremockJar()
+                                    killByPort(env.FLASK_PORT)
+                                    killByPort(env.WIREMOCK_PORT)
+
+                                    startFlask()
+                                    startWiremock()
+
+                                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask')
+                                    waitHttp200("http://127.0.0.1:${env.WIREMOCK_PORT}/__admin", 10, 2, 'Healthcheck Wiremock')
+
+                                    int rc = bat(returnStatus: true, label: 'Pytest Rest', script: """
+                                        @echo off
+                                        set PYTHONPATH=.
+                                        "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
+                                        exit /b %ERRORLEVEL%
+                                    """.stripIndent())
+
+                                    echo "Rest exit code: ${rc} (stage stays green by requirement)"
+                                }
+                            }
+                            post {
+                                always {
+                                    script {
+                                        killByPort(env.FLASK_PORT)
+                                        killByPort(env.WIREMOCK_PORT)
+                                    }
+                                    junit testResults: "${REST_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
+                                }
+                            }
+                        }
+
+                        stage('Performance') {
+                            steps {
+                                logAgentInfo('Performance')
+                                script {
+                                    deleteDir()
+                                    unstash 'SRC'
+                                    ensureReportsDirs()
+
+                                    checkJmeterJar()
+
+                                    killByPort(env.FLASK_PORT)
+                                    startFlask()
+                                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
+
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                        runJmeter()
+                                    }
+                                }
+                            }
+                            post {
+                                always {
+                                    script { killByPort(env.FLASK_PORT) }
+
+                                    perfReport(
+                                        sourceDataFiles: "${JMETER_JTL}",
+                                        errorUnstableThreshold: 1,
+                                        errorFailedThreshold: 5,
+                                        percentiles: '0,50,90,95,100'
+                                    )
+
+                                    archiveArtifacts artifacts: "${JMETER_JTL}", fingerprint: true, allowEmptyArchive: true
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        stage('Results') {
+        stage('Coverage') {
+            agent { label "${PRIMARY_AGENT_LABEL}" }
             steps {
-                unstash name:'unit-res'
-                unstash name:'rest-res'
-                junit 'result*.xml' 
+                logAgentInfo('Coverage')
+                script {
+                    deleteDir()
+                    unstash 'REPORTS'
+                    ensureReportsDirs()
+
+                    def (double linesPct, double branchesPct) = readCoveragePercents()
+                    echo "Coverage lines: ${linesPct}%"
+                    echo "Coverage branches: ${branchesPct}%"
+
+                    boolean linesUnstable = (linesPct >= 85.0 && linesPct <= 95.0)
+                    boolean linesFail = (linesPct < 85.0)
+
+                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct <= 90.0)
+                    boolean branchesFail = (branchesPct < 80.0)
+
+                    if (linesFail || branchesFail) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
+                        }
+                        setBuildResultWorst('FAILURE')
+                    } else if (linesUnstable || branchesUnstable) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
+                        }
+                        setBuildResultWorst('UNSTABLE')
+                    } else {
+                        echo "Coverage OK"
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
+                }
             }
         }
-     
+    }
+
+    post {
+        always {
+            // With multi-agent pipelines, each branch already uses deleteDir().
+            // This cleans the last-used workspace for this final agent context.
+            cleanWs(deleteDirs: true)
+        }
     }
 }
