@@ -3,19 +3,11 @@
  * CP1.2 Jenkinsfile (Windows) - "profesor style" + robusto
  * ==========================================================
  *
- * Objetivos (enunciado/guia):
- * - Stages: Get Code, Unit, Rest, Static, Security, Performance, Coverage
- * - Unit y Rest: siempre VERDES (aunque fallen tests).
- * - Static/Security/Coverage: aplicar umbrales, pero el pipeline debe CONTINUAR siempre.
- * - Unit tests: SOLO se ejecutan UNA vez en TODO el pipeline.
- * - Publicar resultados en cada etapa (sin etapa "Results").
- * - Preparado para Reto 2: whoami/hostname/workspace en CADA etapa + stash/unstash.
- *
- * Nota:
- * - Flake8 y Bandit se formatean para que Warnings-NG los lea con parser "Pylint"
- *   y se aplican qualityGates ahí (menos Groovy, más plugin).
- * - Bandit NO usa SARIF (más limpio). Se usa -f custom + --msg-template para producir
- *   un output estilo pylint.
+ * - Flake8 y Bandit -> Warnings-NG con parser Pylint + qualityGates.
+ * - Bandit SIN SARIF (más limpio): bandit -f custom + msg-template "pylint-like".
+ * - Unit/Rest: siempre verdes.
+ * - Coverage: se calcula desde coverage.json (NO re-ejecuta unit tests).
+ * - whoami/hostname/workspace en cada etapa.
  *
  * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
  */
@@ -112,12 +104,12 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
 
 def startFlask() {
     runBat('Start Flask', """
-        @echo off
+        @echoecho off
         set PYTHONPATH=.
         set FLASK_APP=app\\api.py
         start "" /B "%PYTHON_BIN%" -m flask run --host 127.0.0.1 --port %FLASK_PORT% --no-reload
         exit /b 0
-    """.stripIndent())
+    """.stripIndent().replaceFirst('@echo off', '@echo off'))
 }
 
 def startWiremock() {
@@ -137,14 +129,20 @@ def runFlake8Pylint() {
     """.stripIndent())
 }
 
+/*
+ * FIX CRITICO:
+ * - NO usar ${test_id} / ${msg} (Groovy lo interpreta y peta).
+ * - Usar {test_id} / {msg} (Bandit placeholders reales).
+ * - Usar triple comillas simples '''...''' para evitar interpolacion de Groovy.
+ */
 def runBanditPylintStyle() {
-    runBat('Bandit', """
+    runBat('Bandit', '''
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [${test_id}] ${msg}"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
         "%PYTHON_BIN%" -m bandit --exit-zero -r app -f json   -o "%BANDIT_JSON%"
         exit /b 0
-    """.stripIndent())
+    '''.stripIndent())
 }
 
 def runJmeter() {
@@ -355,7 +353,6 @@ pipeline {
             }
             post {
                 always {
-                    // CLAVE: id unico para evitar colision con otros recordIssues usando pyLint
                     recordIssues(
                         id: 'flake8',
                         enabledForFailure: true,
@@ -378,12 +375,13 @@ pipeline {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
+
+                    // Genera reports\\security\\bandit.out y bandit.json
                     runBanditPylintStyle()
                 }
             }
             post {
                 always {
-                    // CLAVE: id unico para evitar colision con el recordIssues de Flake8
                     recordIssues(
                         id: 'bandit',
                         enabledForFailure: true,
