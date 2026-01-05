@@ -300,22 +300,23 @@ pipeline {
                             echo "Unit exit code: ${rc} (stage stays green by requirement)"
                         }
                     }
-                    post {
-                        always {
-                            junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
-
-                            recordCoverage(
-                                tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
-                                sourceCodeRetention: 'EVERY_BUILD'
-                            )
-
-                            // Reports for later Coverage stage
-                            stash name: 'REPORTS',
-                                  includes: 'reports/**',
-                                  allowEmpty: true,
-                                  useDefaultExcludes: false
-                        }
-                    }
+                   post {
+						always {
+							junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
+					
+							recordCoverage(
+								enabledForFailure: true,
+								tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
+								sourceCodeRetention: 'EVERY_BUILD'
+							)
+					
+							// Reports for later Coverage stage
+							stash name: 'REPORTS',
+								includes: 'reports/**',
+								allowEmpty: true,
+								useDefaultExcludes: false
+						}
+					}
                 }
 
                 stage('Static + Security') {
