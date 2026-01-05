@@ -180,7 +180,7 @@ def readCoveragePercents() {
         script: """
             @echo off
             if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"{t.get('percent_covered',0):.2f}\\\")"
+            "%PYTHON_BIN%" -c "import os,json; p=os.environ.get('COVERAGE_JSON'); d=json.load(open(p)); t=d.get('totals',{}); print(f\\\"{t.get('percent_covered',0):.2f}\\\")"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -191,7 +191,7 @@ def readCoveragePercents() {
         script: """
             @echo off
             if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
+            "%PYTHON_BIN%" -c "import os,json; p=os.environ.get('COVERAGE_JSON'); d=json.load(open(p)); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
             exit /b 0
         """.stripIndent()
     ).trim()
