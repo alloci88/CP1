@@ -181,7 +181,7 @@ def readCoveragePercents() {
         script: """
             @echo off
             if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); print(f\\\"{t.get('percent_covered',0):.2f}\\\")"
+            "%PYTHON_BIN%" -c "import os,json; p=os.environ.get('COVERAGE_JSON'); d=json.load(open(p)); t=d.get('totals',{}); print(f\\\"{t.get('percent_covered',0):.2f}\\\")"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -192,7 +192,7 @@ def readCoveragePercents() {
         script: """
             @echo off
             if not exist "%COVERAGE_JSON%" (echo 0 & exit /b 0)
-            "%PYTHON_BIN%" -c "import json; d=json.load(open(r'%COVERAGE_JSON%')); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
+            "%PYTHON_BIN%" -c "import os,json; p=os.environ.get('COVERAGE_JSON'); d=json.load(open(p)); t=d.get('totals',{}); cb=t.get('covered_branches',0); nb=t.get('num_branches',0); pct=(cb*100.0/nb) if nb else 0.0; print(f\\\"{pct:.2f}\\\")"
             exit /b 0
         """.stripIndent()
     ).trim()
@@ -319,55 +319,77 @@ pipeline {
                 }
 
                 stage('Static + Security') {
-                    agent { label "${STATIC_SECURITY_AGENT_LABEL}" }
-                    steps {
-                        logAgentInfo('Static+Security')
-                        script {
-                            deleteDir()
-                            unstash 'SRC'
-                            ensureReportsDirs()
+					agent { label "${STATIC_SECURITY_AGENT_LABEL}" }
+					stages {
+				
+						stage('Static') {
+							steps {
+								logAgentInfo('Static')
+								script {
+									deleteDir()
+									unstash 'SRC'
+									ensureReportsDirs()
+				
+									runFlake8Pylint()
+								}
+							}
+							post {
+								always {
+									// Flake8 gates: >=8 unstable, >=10 failure. Continue pipeline always.
+									catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+										recordIssues(
+											id: 'flake8',
+											enabledForFailure: true,
+											tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
+											qualityGates: [
+												[threshold: 8, type: 'TOTAL', unstable: true],
+												[threshold: 10, type: 'TOTAL', unstable: false]
+											]
+										)
+									}
+				
+									archiveArtifacts artifacts: "${FLAKE8_REPORT}",
+													fingerprint: true,
+													allowEmptyArchive: true
+								}
+							}
+						}
+				
+						stage('Security') {
+							steps {
+								logAgentInfo('Security')
+								script {
+									deleteDir()
+									unstash 'SRC'
+									ensureReportsDirs()
+				
+									runBanditPylintStyle()
+								}
+							}
+							post {
+								always {
+									// Bandit gates: >=2 unstable, >=4 failure. Continue pipeline always.
+									catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+										recordIssues(
+											id: 'bandit',
+											enabledForFailure: true,
+											tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
+											qualityGates: [
+												[threshold: 2, type: 'TOTAL', unstable: true],
+												[threshold: 4, type: 'TOTAL', unstable: false]
+											]
+										)
+									}
+				
+									archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}",
+													fingerprint: true,
+													allowEmptyArchive: true
+								}
+							}
+						}
+					}
+				}
 
-                            // Static
-                            runFlake8Pylint()
-
-                            // Security
-                            runBanditPylintStyle()
-                        }
-                    }
-                    post {
-                        always {
-                            // Flake8 gates: >=8 unstable, >=10 failure. Continue pipeline always.
-                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                                recordIssues(
-                                    id: 'flake8',
-                                    enabledForFailure: true,
-                                    tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
-                                    qualityGates: [
-                                        [threshold: 8, type: 'TOTAL', unstable: true],
-                                        [threshold: 10, type: 'TOTAL', unstable: false]
-                                    ]
-                                )
-                            }
-
-                            // Bandit gates: >=2 unstable, >=4 failure. Continue pipeline always.
-                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                                recordIssues(
-                                    id: 'bandit',
-                                    enabledForFailure: true,
-                                    tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
-                                    qualityGates: [
-                                        [threshold: 2, type: 'TOTAL', unstable: true],
-                                        [threshold: 4, type: 'TOTAL', unstable: false]
-                                    ]
-                                )
-                            }
-
-                            archiveArtifacts artifacts: "${FLAKE8_REPORT},${BANDIT_OUT},${BANDIT_JSON}",
-                                             fingerprint: true,
-                                             allowEmptyArchive: true
-                        }
-                    }
-                }
 
                 stage('Rest + Performance') {
                     agent { label "${QA_PERF_AGENT_LABEL}" }
