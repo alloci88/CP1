@@ -1,10 +1,10 @@
 /*
  * ==========================================================
- * CP1.2 Jenkinsfile (Windows) - Warnings-NG quality gates
+ * CP1.2 Jenkinsfile (Windows) - Deterministic quality gates
  * ==========================================================
  *
- * - Flake8 y Bandit -> Warnings-NG con parser Pylint + qualityGates.
- * - Bandit SIN SARIF (más limpio): bandit -f custom + msg-template "pylint-like".
+ * - Flake8 y Bandit -> Warnings-NG (solo para graficas) + gates propios por conteo.
+ * - Bandit SIN SARIF (mas limpio): bandit -f custom + msg-template "pylint-like".
  * - Unit/Rest: siempre verdes.
  * - Coverage: se calcula desde coverage.json (NO re-ejecuta unit tests).
  * - whoami/hostname/workspace en cada etapa.
@@ -167,6 +167,61 @@ def setBuildResultWorst(String target) {
     } else {
         echo "Build result unchanged: ${current} (requested ${target})"
     }
+}
+
+/*
+ * Deterministic gates (match enunciado)
+ */
+def countPylintLikeFindings(String reportPath) {
+    String out = bat(
+        label: "Count findings in ${reportPath}",
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "${reportPath}" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "p=r'''${reportPath}'''; f=open(p,'r',encoding='utf-8',errors='ignore'); print(sum(1 for line in f if line.strip()))"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    return out ? out.toInteger() : 0
+}
+
+def countBanditFindingsFromJson(String banditJsonPath) {
+    String out = bat(
+        label: "Count bandit findings in ${banditJsonPath}",
+        returnStdout: true,
+        script: """
+            @echo off
+            if not exist "${banditJsonPath}" (echo 0 & exit /b 0)
+            "%PYTHON_BIN%" -c "import json; p=r'''${banditJsonPath}'''; d=json.load(open(p,'r',encoding='utf-8',errors='ignore')); print(len(d.get('results', [])))"
+            exit /b 0
+        """.stripIndent()
+    ).trim()
+
+    return out ? out.toInteger() : 0
+}
+
+def applyCountQualityGate(String stageLabel, int findings, int unstableFrom, int failureFrom) {
+    echo "${stageLabel} findings = ${findings} (unstable>=${unstableFrom}, failure>=${failureFrom})"
+
+    if (findings >= failureFrom) {
+        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            error("${stageLabel} unhealthy: ${findings} findings (>=${failureFrom})")
+        }
+        setBuildResultWorst('FAILURE')
+        return
+    }
+
+    if (findings >= unstableFrom) {
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+            error("${stageLabel} unstable: ${findings} findings (>=${unstableFrom})")
+        }
+        setBuildResultWorst('UNSTABLE')
+        return
+    }
+
+    echo "${stageLabel} OK"
 }
 
 /*
@@ -353,21 +408,21 @@ pipeline {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
+
                     runFlake8Pylint()
+
+                    int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
+                    applyCountQualityGate('Flake8', findings, 8, 10)
                 }
             }
             post {
                 always {
-                    // Importante: qualityGates aquí marcan UNSTABLE/FAILURE por TOTAL issues.
-                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    // Warnings-NG solo para graficas/historico (sin qualityGates)
+                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                         recordIssues(
                             id: 'flake8',
                             enabledForFailure: true,
-                            tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
-                            qualityGates: [
-                                [threshold: 8, type: 'TOTAL', unstable: true],
-                                [threshold: 10, type: 'TOTAL', unstable: false]
-                            ]
+                            tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")]
                         )
                     }
 
@@ -383,20 +438,20 @@ pipeline {
                     deleteDir()
                     unstash 'SRC'
                     ensureReportsDirs()
+
                     runBanditPylintStyle()
+
+                    int findings = countBanditFindingsFromJson(env.BANDIT_JSON)
+                    applyCountQualityGate('Bandit', findings, 2, 4)
                 }
             }
             post {
                 always {
-                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                         recordIssues(
                             id: 'bandit',
                             enabledForFailure: true,
-                            tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
-                            qualityGates: [
-                                [threshold: 2, type: 'TOTAL', unstable: true],
-                                [threshold: 4, type: 'TOTAL', unstable: false]
-                            ]
+                            tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")]
                         )
                     }
 
