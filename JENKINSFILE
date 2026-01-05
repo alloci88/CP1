@@ -1,6 +1,6 @@
 /*
  * ==========================================================
- * CP1.2 Jenkinsfile (Windows)
+ * CP1.2 Jenkinsfile (Windows) - "profesor style" + robusto
  * ==========================================================
  *
  * Objetivos (enunciado/guia):
@@ -13,7 +13,7 @@
  *
  * Nota:
  * - Flake8 y Bandit se formatean para que Warnings-NG los lea con parser "Pylint"
- *   (como el profesor), y se aplican qualityGates ahí (menos Groovy, más plugin).
+ *   y se aplican qualityGates ahí (menos Groovy, más plugin).
  * - Bandit NO usa SARIF (más limpio). Se usa -f custom + --msg-template para producir
  *   un output estilo pylint.
  *
@@ -24,15 +24,10 @@
  * Helper functions
  * ========================= */
 
-/** Ejecuta un comando batch con etiqueta clara en log */
 def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
-/**
- * Reto 2: En cada etapa deben aparecer whoami/hostname/workspace.
- * (Si agentes comparten usuario, WORKSPACE ayuda a distinguir).
- */
 def logAgentInfo(String stageName) {
     runBat("Agent info (${stageName})", """
         @echo off
@@ -44,7 +39,6 @@ def logAgentInfo(String stageName) {
     """.stripIndent())
 }
 
-/** Crea estructura de carpetas de reports (idempotente). */
 def ensureReportsDirs() {
     runBat('Ensure reports dirs', """
         @echo off
@@ -59,7 +53,6 @@ def ensureReportsDirs() {
     """.stripIndent())
 }
 
-/** Log verboso SOLO una vez (útil para Reto 1). */
 def prepWorkspaceVerbose() {
     runBat('Workspace info (verbose)', """
         @echo off
@@ -73,7 +66,6 @@ def prepWorkspaceVerbose() {
     """.stripIndent())
 }
 
-/** Verifica Wiremock JAR. */
 def checkWiremockJar() {
     runBat('Check Wiremock jar', """
         @echo off
@@ -82,7 +74,6 @@ def checkWiremockJar() {
     """.stripIndent())
 }
 
-/** Verifica JMeter (jar). */
 def checkJmeterJar() {
     runBat('Check JMeter', """
         @echo off
@@ -91,10 +82,6 @@ def checkJmeterJar() {
     """.stripIndent())
 }
 
-/**
- * Mata el proceso que esté escuchando en un puerto concreto.
- * Evita flakiness por servicios "huérfanos" de ejecuciones previas.
- */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
@@ -105,10 +92,6 @@ def killByPort(String port) {
     """.stripIndent())
 }
 
-/**
- * Espera hasta recibir HTTP 200 en una URL (healthcheck).
- * Reduce flakiness por arranque asíncrono de Flask/Wiremock.
- */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label,
         '''
@@ -127,7 +110,6 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     )
 }
 
-/** Arranca Flask en background. */
 def startFlask() {
     runBat('Start Flask', """
         @echo off
@@ -138,7 +120,6 @@ def startFlask() {
     """.stripIndent())
 }
 
-/** Arranca Wiremock en background. */
 def startWiremock() {
     runBat('Start Wiremock', """
         @echo off
@@ -147,11 +128,6 @@ def startWiremock() {
     """.stripIndent())
 }
 
-/**
- * Flake8 en formato parseable por Warnings-NG usando parser Pylint:
- * - --exit-zero: siempre exit 0 (pipeline sigue)
- * - --format=pylint: salida "path:line:col: code msg" (compatible con Pylint parser)
- */
 def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
@@ -161,24 +137,16 @@ def runFlake8Pylint() {
     """.stripIndent())
 }
 
-/**
- * Bandit "profesor style" para Warnings-NG:
- * - --exit-zero: siempre exit 0 (pipeline sigue)
- * - -f custom + --msg-template: emitimos líneas estilo pylint
- *   Formato resultante: "<path>:<line>: [<test_id>] <msg>"
- * - Lo parseamos con parser Pylint (pyLint tool) en Warnings-NG.
- */
 def runBanditPylintStyle() {
     runBat('Bandit', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [${test_id}] ${msg}"
         "%PYTHON_BIN%" -m bandit --exit-zero -r app -f json   -o "%BANDIT_JSON%"
         exit /b 0
     """.stripIndent())
 }
 
-/** Ejecuta JMeter (no-GUI) usando el test plan .jmx y genera .jtl. */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
@@ -188,10 +156,6 @@ def runJmeter() {
     """.stripIndent())
 }
 
-/**
- * Escalador de estado del build:
- * mantiene el "peor" resultado entre stages independientes.
- */
 def setBuildResultWorst(String target) {
     String current = (currentBuild.result ?: 'SUCCESS')
     Map<String, Integer> rank = ['SUCCESS': 0, 'UNSTABLE': 1, 'FAILURE': 2]
@@ -206,10 +170,6 @@ def setBuildResultWorst(String target) {
     }
 }
 
-/**
- * Lee porcentajes desde coverage.json (creado en Unit).
- * NO se re-ejecutan unit tests (requisito del enunciado).
- */
 def readCoveragePercents() {
     String outLines = bat(
         label: 'Read coverage percent (lines)',
@@ -247,7 +207,7 @@ pipeline {
 
     options {
         timestamps()
-        skipDefaultCheckout(true)  // hacemos checkout en "Get Code" manualmente
+        skipDefaultCheckout(true)
     }
 
     environment {
@@ -299,7 +259,6 @@ pipeline {
                 prepWorkspaceVerbose()
                 ensureReportsDirs()
 
-                // Stash del código para stages posteriores (y Reto 2 con agentes).
                 stash name: 'SRC',
                       includes: '**/*',
                       excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
@@ -307,14 +266,6 @@ pipeline {
             }
         }
 
-        /*
-         * Unit: se ejecuta UNA sola vez en todo el pipeline.
-         * Además, aquí generamos coverage.xml y coverage.json para usar luego sin re-ejecutar tests.
-         *
-         * Requisito: siempre VERDE aunque fallen tests.
-         * - No fallamos el stage por exit code de pytest (capturamos returnStatus).
-         * - Y el step junit no marca build unstable (skipMarkingBuildUnstable).
-         */
         stage('Unit') {
             steps {
                 logAgentInfo('Unit')
@@ -337,16 +288,13 @@ pipeline {
             }
             post {
                 always {
-                    // Publica tests sin marcar UNSTABLE si hay fallos (requisito: stage siempre verde).
                     junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
 
-                    // Publica cobertura para la gráfica de Coverage plugin.
                     recordCoverage(
                         tools: [[parser: 'COBERTURA', pattern: "${COVERAGE_XML}"]],
                         sourceCodeRetention: 'EVERY_BUILD'
                     )
 
-                    // Stash de reports (incluye coverage.xml/json) para Coverage stage o agentes.
                     stash name: 'REPORTS',
                           includes: 'reports/**',
                           allowEmpty: true,
@@ -355,10 +303,6 @@ pipeline {
             }
         }
 
-        /*
-         * Rest (integración): igual que CP1.1.
-         * Requisito: siempre VERDE aunque fallen tests.
-         */
         stage('Rest') {
             steps {
                 logAgentInfo('Rest')
@@ -368,8 +312,6 @@ pipeline {
                     ensureReportsDirs()
 
                     checkWiremockJar()
-
-                    // Limpiar puertos por si quedaron procesos colgados
                     killByPort(env.FLASK_PORT)
                     killByPort(env.WIREMOCK_PORT)
 
@@ -396,24 +338,11 @@ pipeline {
                         killByPort(env.WIREMOCK_PORT)
                     }
 
-                    // Igual que Unit: publicar sin marcar build unstable por fallos de tests.
                     junit testResults: "${REST_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
                 }
             }
         }
 
-        /*
-         * Static (flake8):
-         * - Ejecutamos flake8 en formato "pylint" para Warnings-NG.
-         * - Quality gates (guia):
-         *   >=8  => UNSTABLE
-         *   >=10 => FAILURE
-         * - Pipeline debe continuar SIEMPRE (aunque quede rojo).
-         *
-         * Implementación:
-         * - flake8 --exit-zero evita fallar el comando
-         * - recordIssues + qualityGates marca estado del stage/build automáticamente
-         */
         stage('Static') {
             steps {
                 logAgentInfo('Static')
@@ -426,14 +355,13 @@ pipeline {
             }
             post {
                 always {
-                    // Parser Pylint leyendo salida de flake8 en formato pylint.
+                    // CLAVE: id unico para evitar colision con otros recordIssues usando pyLint
                     recordIssues(
+                        id: 'flake8',
                         enabledForFailure: true,
                         tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")],
                         qualityGates: [
-                            // >=8 -> UNSTABLE
                             [threshold: 8, type: 'TOTAL', unstable: true],
-                            // >=10 -> FAILURE
                             [threshold: 10, type: 'TOTAL', unstable: false]
                         ]
                     )
@@ -443,14 +371,6 @@ pipeline {
             }
         }
 
-        /*
-         * Security (bandit):
-         * - Bandit genera bandit.out estilo pylint (custom + msg-template)
-         * - Warnings-NG parsea con parser Pylint y aplica quality gates:
-         *   >=2 -> UNSTABLE
-         *   >=4 -> FAILURE
-         * - Pipeline debe continuar siempre.
-         */
         stage('Security') {
             steps {
                 logAgentInfo('Security')
@@ -463,13 +383,13 @@ pipeline {
             }
             post {
                 always {
+                    // CLAVE: id unico para evitar colision con el recordIssues de Flake8
                     recordIssues(
+                        id: 'bandit',
                         enabledForFailure: true,
                         tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")],
                         qualityGates: [
-                            // >=2 -> UNSTABLE
                             [threshold: 2, type: 'TOTAL', unstable: true],
-                            // >=4 -> FAILURE
                             [threshold: 4, type: 'TOTAL', unstable: false]
                         ]
                     )
@@ -479,14 +399,6 @@ pipeline {
             }
         }
 
-        /*
-         * Performance (JMeter):
-         * - Flask debe estar levantado para que JMeter pueda atacar suma/resta.
-         * - Ejecutamos JMeter no-GUI y publicamos con plugin Performance.
-         *
-         * Nota: el build puede quedar FAILURE por otras etapas (Static/Coverage),
-         * pero Performance debe ejecutarse igualmente.
-         */
         stage('Performance') {
             steps {
                 logAgentInfo('Performance')
@@ -497,12 +409,10 @@ pipeline {
 
                     checkJmeterJar()
 
-                    // Flask para JMeter (Wiremock no necesario para suma/resta)
                     killByPort(env.FLASK_PORT)
                     startFlask()
                     waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
 
-                    // Si JMeter falla, marcamos stage FAILURE, pero el pipeline sigue.
                     catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                         runJmeter()
                     }
@@ -510,11 +420,8 @@ pipeline {
             }
             post {
                 always {
-                    script {
-                        killByPort(env.FLASK_PORT)
-                    }
+                    script { killByPort(env.FLASK_PORT) }
 
-                    // Publica JTL en plugin Performance (gráficas, percentiles, etc.)
                     perfReport(
                         sourceDataFiles: "${JMETER_JTL}",
                         errorUnstableThreshold: 1,
@@ -527,22 +434,11 @@ pipeline {
             }
         }
 
-        /*
-         * Coverage:
-         * - NO se vuelven a ejecutar unit tests (requisito).
-         * - Leemos coverage.json generado en Unit.
-         * - Aplicamos umbrales guía:
-         *   Lines: 85..95 UNSTABLE, >95 GREEN, <85 FAILURE
-         *   Branches: 80..90 UNSTABLE, >90 GREEN, <80 FAILURE
-         * - Pipeline debe continuar siempre.
-         */
         stage('Coverage') {
             steps {
                 logAgentInfo('Coverage')
                 script {
                     deleteDir()
-
-                    // Solo necesitamos los reports generados en Unit (coverage.json)
                     unstash 'REPORTS'
                     ensureReportsDirs()
 
@@ -581,7 +477,6 @@ pipeline {
 
     post {
         always {
-            // Limpieza final del workspace (buena práctica + Reto 2)
             cleanWs(deleteDirs: true)
         }
     }
