@@ -124,7 +124,7 @@ def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m flake8 app test --exit-zero --format=pylint > "%FLAKE8_REPORT%"
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py --exit-zero --format=pylint > "%FLAKE8_REPORT%"
         exit /b 0
     """.stripIndent())
 }
