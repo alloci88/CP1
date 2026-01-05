@@ -495,9 +495,9 @@ pipeline {
 
     post {
         always {
-            // With multi-agent pipelines, each branch already uses deleteDir().
-            // This cleans the last-used workspace for this final agent context.
-            cleanWs(deleteDirs: true)
+            // agent none => no node/workspace context here.
+            // Workspaces are already cleaned per-branch using deleteDir().
+            echo 'Post: skipped global cleanWs() because pipeline uses agent none.'
         }
     }
 }
