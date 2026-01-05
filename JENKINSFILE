@@ -134,13 +134,16 @@ def runFlake8Pylint() {
  * - Important: {test_id}/{msg} are bandit placeholders (NOT ${...} which Groovy would interpolate).
  */
 def runBanditPylintStyle() {
-    runBat('Bandit', '''
+    runBat('Bandit', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
-        "%PYTHON_BIN%" -m bandit --exit-zero -r app -f json   -o "%BANDIT_JSON%"
+
+        rem Scan app + test folders (same scope as shown in class)
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app test -f custom -o "%BANDIT_OUT%" --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+        "%PYTHON_BIN%" -m bandit --exit-zero -r app test -f json   -o "%BANDIT_JSON%"
+
         exit /b 0
-    '''.stripIndent())
+    """.stripIndent())
 }
 
 def runJmeter() {
