@@ -3,23 +3,33 @@
  * CP1.2 Jenkinsfile (Windows) - Deterministic quality gates
  * ==========================================================
  *
- * - Flake8 y Bandit -> Warnings-NG (solo para graficas) + gates propios por conteo.
- * - Bandit SIN SARIF (mas limpio): bandit -f custom + msg-template "pylint-like".
- * - Unit/Rest: siempre verdes.
- * - Coverage: se calcula desde coverage.json (NO re-ejecuta unit tests).
- * - whoami/hostname/workspace en cada etapa.
+ * Idea general:
+ * - Ejecutamos todas las pruebas del enunciado.
+ * - Unit/Rest siempre VERDES (requisito).
+ * - Static/Security/Coverage aplican umbrales del enunciado pero SIN detener el pipeline.
+ * - Warnings-NG y Coverage plugin se usan para graficas/historico, pero los gates se controlan de forma determinista.
  *
- * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
+ * Nota Windows:
+ * - ASCII only para evitar problemas de encoding en Jenkins/Windows.
+ * - Uso de venv via PYTHON_BIN para que el pipeline no dependa del PATH del servicio (SYSTEM).
  */
 
 /* =========================
  * Helper functions
  * ========================= */
 
+/*
+ * Wrapper simple para bat() con label. Mejora legibilidad del log.
+ */
 def runBat(String label, String script) {
     bat(label: label, script: script)
 }
 
+/*
+ * Requisito del enunciado en el reto de agentes:
+ * - whoami, hostname, workspace por etapa.
+ * Aunque este Jenkinsfile sea "agent unico", lo dejamos igual para consistencia y trazabilidad.
+ */
 def logAgentInfo(String stageName) {
     runBat("Agent info (${stageName})", """
         @echo off
@@ -31,6 +41,11 @@ def logAgentInfo(String stageName) {
     """.stripIndent())
 }
 
+/*
+ * Crear carpetas de reports siempre, para:
+ * - Evitar fallos si el plugin intenta publicar un fichero que no existe.
+ * - Evitar depender del estado previo del workspace.
+ */
 def ensureReportsDirs() {
     runBat('Ensure reports dirs', """
         @echo off
@@ -45,6 +60,11 @@ def ensureReportsDirs() {
     """.stripIndent())
 }
 
+/*
+ * Diagnostico del entorno:
+ * - Como Jenkins corre como servicio (a menudo NT AUTHORITY\\SYSTEM), no se debe confiar en PATH del usuario.
+ * - Imprimimos version de Python para trazabilidad.
+ */
 def prepWorkspaceVerbose() {
     runBat('Workspace info (verbose)', """
         @echo off
@@ -58,6 +78,10 @@ def prepWorkspaceVerbose() {
     """.stripIndent())
 }
 
+/*
+ * Wiremock: verificacion temprana para fallar rapido si falta el jar.
+ * Evita perder tiempo levantando pruebas si no existe la herramienta.
+ */
 def checkWiremockJar() {
     runBat('Check Wiremock jar', """
         @echo off
@@ -66,6 +90,9 @@ def checkWiremockJar() {
     """.stripIndent())
 }
 
+/*
+ * JMeter: misma idea. Fallar pronto si no esta instalado/configurado.
+ */
 def checkJmeterJar() {
     runBat('Check JMeter', """
         @echo off
@@ -74,6 +101,11 @@ def checkJmeterJar() {
     """.stripIndent())
 }
 
+/*
+ * Windows + servidores locales:
+ * - Si una ejecucion anterior dejo Flask/Wiremock vivos, el siguiente build fallaria por "port in use".
+ * - Matamos por puerto para idempotencia del pipeline.
+ */
 def killByPort(String port) {
     runBat("Stop processes on ${port}", """
         @echo off
@@ -84,6 +116,11 @@ def killByPort(String port) {
     """.stripIndent())
 }
 
+/*
+ * Healthcheck activo:
+ * - Esperar a HTTP 200 antes de lanzar tests o JMeter.
+ * - Reduce flakiness por arranque lento.
+ */
 def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     runBat(label,
         '''
@@ -102,6 +139,11 @@ def waitHttp200(String url, int maxTries, int timeoutSec, String label) {
     )
 }
 
+/*
+ * Flask se levanta en background:
+ * - Requisito para Rest y Performance.
+ * - --no-reload para evitar procesos duplicados.
+ */
 def startFlask() {
     runBat('Start Flask', """
         @echo off
@@ -112,6 +154,10 @@ def startFlask() {
     """.stripIndent())
 }
 
+/*
+ * Wiremock para tests Rest:
+ * - Se lanza con root-dir apuntando a test\\wiremock (mappings, etc.).
+ */
 def startWiremock() {
     runBat('Start Wiremock', """
         @echo off
@@ -120,6 +166,12 @@ def startWiremock() {
     """.stripIndent())
 }
 
+/*
+ * Flake8:
+ * - --exit-zero para que flake8 NO decida el resultado Jenkins.
+ * - --format=pylint para que Warnings-NG (parser pyLint) lo pueda graficar.
+ * - Gate real se aplica despues por conteo de hallazgos (enunciado).
+ */
 def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
@@ -130,8 +182,12 @@ def runFlake8Pylint() {
 }
 
 /*
- * Bandit in pylint-like format:
- * - Important: {test_id}/{msg} are bandit placeholders (NOT ${...} which Groovy would interpolate).
+ * Bandit:
+ * - Mismo enfoque: --exit-zero para no abortar.
+ * - Generamos:
+ *   - bandit.out en formato "pylint-like" para Warnings-NG (graficas).
+ *   - bandit.json para conteo determinista (len(results)).
+ * Nota: {test_id}/{msg} son placeholders de bandit (no Groovy).
  */
 def runBanditPylintStyle() {
     runBat('Bandit', """
@@ -146,6 +202,11 @@ def runBanditPylintStyle() {
     """.stripIndent())
 }
 
+/*
+ * JMeter no-GUI:
+ * - Limpia el .jtl anterior para no mezclar resultados.
+ * - Si falla JMeter, devolvemos su ERRORLEVEL para poder marcar stage rojo (pero sin parar pipeline via catchError).
+ */
 def runJmeter() {
     runBat('JMeter', """
         @echo off
@@ -156,7 +217,10 @@ def runJmeter() {
 }
 
 /*
- * Build result escalator (SUCCESS < UNSTABLE < FAILURE)
+ * Build result escalator:
+ * - Evita que el build "mejore" al final si ya hubo un FAIL antes.
+ * - Regla: SUCCESS < UNSTABLE < FAILURE.
+ * - Se usa tras aplicar gates (Static/Security/Coverage).
  */
 def setBuildResultWorst(String target) {
     String current = (currentBuild.result ?: 'SUCCESS')
@@ -173,7 +237,9 @@ def setBuildResultWorst(String target) {
 }
 
 /*
- * Deterministic gates (match enunciado)
+ * Conteo determinista de hallazgos:
+ * - Flake8 en formato pylint: 1 hallazgo por linea (no vacia).
+ * - Se cuenta con un mini-script Python para evitar dependencias extra.
  */
 def countPylintLikeFindings(String reportPath) {
     String out = bat(
@@ -190,6 +256,11 @@ def countPylintLikeFindings(String reportPath) {
     return out ? out.toInteger() : 0
 }
 
+/*
+ * Conteo determinista bandit:
+ * - Se usa bandit.json y se cuenta len(results).
+ * - Esto evita depender del formato de texto para gates.
+ */
 def countBanditFindingsFromJson(String banditJsonPath) {
     String out = bat(
         label: "Count bandit findings in ${banditJsonPath}",
@@ -205,6 +276,14 @@ def countBanditFindingsFromJson(String banditJsonPath) {
     return out ? out.toInteger() : 0
 }
 
+/*
+ * Aplicacion de gates por conteo:
+ * - stageResult marca la etapa (amarillo/rojo) pero buildResult se deja SUCCESS dentro del catchError para NO abortar pipeline.
+ * - setBuildResultWorst aplica el resultado global al peor nivel alcanzado.
+ * Umbrales (enunciado):
+ * - Flake8: unstable >= 8, failure >= 10
+ * - Bandit: unstable >= 2, failure >= 4
+ */
 def applyCountQualityGate(String stageLabel, int findings, int unstableFrom, int failureFrom) {
     echo "${stageLabel} findings = ${findings} (unstable>=${unstableFrom}, failure>=${failureFrom})"
 
@@ -228,8 +307,9 @@ def applyCountQualityGate(String stageLabel, int findings, int unstableFrom, int
 }
 
 /*
- * Coverage read (NO re-running unit tests allowed).
- * Reads totals from coverage.json created in Unit stage.
+ * Lectura de cobertura sin re-ejecutar Unit:
+ * - Requisito: tests unitarios solo se ejecutan 1 vez en el pipeline.
+ * - Unit genera coverage.json; Coverage solo lo lee y calcula % lineas y % ramas.
  */
 def readCoveragePercents() {
     String outLines = bat(
@@ -264,16 +344,31 @@ def readCoveragePercents() {
  * ========================= */
 
 pipeline {
+    /*
+     * Agente unico:
+     * - Este Jenkinsfile es la version "reto 1" (sin distribucion de agentes).
+     */
     agent any
 
     options {
+        /*
+         * timestamps: facilita lectura del log y evidencia de paralelismo/esperas (en otras variantes).
+         * skipDefaultCheckout: evitamos el checkout automatico porque controlamos el checkout en "Get Code".
+         */
         timestamps()
         skipDefaultCheckout(true)
     }
 
     environment {
+        /*
+         * PYTHON_BIN fijo al venv:
+         * - Reproducibilidad. Evita depender de PATH del servicio Jenkins (SYSTEM).
+         */
         PYTHON_BIN = 'C:\\ci\\venvs\\cp1\\Scripts\\python.exe'
 
+        /*
+         * Estructura de reports: cada herramienta escribe en su carpeta.
+         */
         REPORTS_DIR = 'reports'
         REPORTS_UNIT_DIR = 'reports\\unit'
         REPORTS_REST_DIR = 'reports\\rest'
@@ -282,25 +377,44 @@ pipeline {
         REPORTS_COVERAGE_DIR = 'reports\\coverage'
         REPORTS_PERFORMANCE_DIR = 'reports\\performance'
 
+        /*
+         * Paths de outputs para plugins:
+         * - junit (unit/rest)
+         * - coverage plugin (xml)
+         * - gates coverage (json)
+         */
         UNIT_JUNIT = 'reports\\unit\\result-unit.xml'
         REST_JUNIT = 'reports\\rest\\result-rest.xml'
         COVERAGE_XML = 'reports\\coverage\\coverage.xml'
         COVERAGE_JSON = 'reports\\coverage\\coverage.json'
 
+        /*
+         * Outputs static/security para Warnings-NG y gates.
+         */
         FLAKE8_REPORT = 'reports\\static\\flake8.out'
-
         BANDIT_OUT = 'reports\\security\\bandit.out'
         BANDIT_JSON = 'reports\\security\\bandit.json'
 
+        /*
+         * Puertos locales para Flask/Wiremock.
+         */
         FLASK_PORT = '5000'
         WIREMOCK_PORT = '9090'
 
+        /*
+         * Herramientas locales:
+         * - jar de wiremock
+         * - jar de jmeter (distribucion de jmeter)
+         */
         WIREMOCK_JAR = 'C:\\ci\\tools\\wiremock-standalone-3.13.2.jar'
-
         JMETER_JAR = 'C:\\ci\\tools\\apache-jmeter-5.6.3\\bin\\ApacheJMeter.jar'
         JMETER_TESTPLAN = 'test\\jmeter\\flask.jmx'
         JMETER_JTL = 'reports\\performance\\jmeter.jtl'
 
+        /*
+         * SCM:
+         * - repo y branch objetivo.
+         */
         REPO_URL = 'https://github.com/alloci88/CP1.git'
         REPO_BRANCH = '*/master'
     }
@@ -309,6 +423,11 @@ pipeline {
 
         stage('Get Code') {
             steps {
+                /*
+                 * Checkout controlado + stash del codigo:
+                 * - stash/unstash se usa incluso en agente unico para mantener compatibilidad con JENKINSFILE_agentes.
+                 * - Excluimos reports/coverage/__pycache__ para no arrastrar artefactos de builds previos.
+                 */
                 logAgentInfo('Get Code')
 
                 checkout([
@@ -329,6 +448,12 @@ pipeline {
 
         stage('Unit') {
             steps {
+                /*
+                 * Unit:
+                 * - Ejecuta pytest UNA sola vez.
+                 * - Genera junitxml + coverage xml/json.
+                 * - Se captura exit code pero NO se degrada el stage (requisito: siempre verde).
+                 */
                 logAgentInfo('Unit')
                 script {
                     deleteDir()
@@ -349,6 +474,12 @@ pipeline {
             }
             post {
                 always {
+                    /*
+                     * Publicacion resultados:
+                     * - junit: grafica de tests. skipMarkingBuildUnstable para no cambiar estado.
+                     * - recordCoverage: graficas de cobertura en Jenkins.
+                     * - stash REPORTS: necesario para la etapa Coverage (leer coverage.json) sin re-ejecutar tests.
+                     */
                     junit testResults: "${UNIT_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
 
                     recordCoverage(
@@ -366,6 +497,13 @@ pipeline {
 
         stage('Rest') {
             steps {
+                /*
+                 * Integracion:
+                 * - Arranca Flask + Wiremock en background.
+                 * - Healthchecks 200 antes de test.
+                 * - Ejecuta pytest rest y publica junit.
+                 * - Siempre verde por requisito.
+                 */
                 logAgentInfo('Rest')
                 script {
                     deleteDir()
@@ -394,6 +532,10 @@ pipeline {
             }
             post {
                 always {
+                    /*
+                     * Limpieza de puertos SIEMPRE:
+                     * - Evita que procesos colgados rompan builds posteriores.
+                     */
                     script {
                         killByPort(env.FLASK_PORT)
                         killByPort(env.WIREMOCK_PORT)
@@ -406,6 +548,13 @@ pipeline {
 
         stage('Static') {
             steps {
+                /*
+                 * Static:
+                 * - Flake8 escribe reporte en formato pylint.
+                 * - Se cuenta hallazgos y se aplican umbrales del enunciado:
+                 *   unstable >= 8, failure >= 10.
+                 * - Se marca stage/build pero NO se detiene pipeline.
+                 */
                 logAgentInfo('Static')
                 script {
                     deleteDir()
@@ -420,7 +569,11 @@ pipeline {
             }
             post {
                 always {
-                    // Warnings-NG solo para graficas/historico (sin qualityGates)
+                    /*
+                     * Warnings-NG:
+                     * - Solo graficas/historico. No usamos sus quality gates para que el gate sea determinista y calcado al enunciado.
+                     * - catchError aqui evita que un fallo del plugin impida el build.
+                     */
                     catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                         recordIssues(
                             id: 'flake8',
@@ -436,6 +589,12 @@ pipeline {
 
         stage('Security') {
             steps {
+                /*
+                 * Security:
+                 * - Bandit genera reporte pylint-like + JSON.
+                 * - Gate por conteo JSON con umbrales del enunciado:
+                 *   unstable >= 2, failure >= 4.
+                 */
                 logAgentInfo('Security')
                 script {
                     deleteDir()
@@ -450,6 +609,9 @@ pipeline {
             }
             post {
                 always {
+                    /*
+                     * Warnings-NG para historico.
+                     */
                     catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
                         recordIssues(
                             id: 'bandit',
@@ -465,6 +627,12 @@ pipeline {
 
         stage('Performance') {
             steps {
+                /*
+                 * Performance:
+                 * - Requisito: ejecutar test-plan JMeter con Flask levantado.
+                 * - No necesita Wiremock (solo suma/resta).
+                 * - catchError marca etapa roja si JMeter falla, pero pipeline continua.
+                 */
                 logAgentInfo('Performance')
                 script {
                     deleteDir()
@@ -484,6 +652,11 @@ pipeline {
             }
             post {
                 always {
+                    /*
+                     * Siempre matamos Flask y publicamos:
+                     * - perfReport para graficas (incluye percentiles: 90 requerido).
+                     * - archiveArtifacts del .jtl para evidencia.
+                     */
                     script { killByPort(env.FLASK_PORT) }
 
                     perfReport(
@@ -500,6 +673,15 @@ pipeline {
 
         stage('Coverage') {
             steps {
+                /*
+                 * Coverage:
+                 * - No re-ejecuta pytest.
+                 * - Lee coverage.json generado en Unit (stash REPORTS).
+                 * - Aplica umbrales del enunciado para lineas y ramas:
+                 *   Lineas: 85-95 UNSTABLE, <85 FAILURE.
+                 *   Ramas:  80-90 UNSTABLE, <80 FAILURE.
+                 * - Marca stage/build pero NO detiene pipeline.
+                 */
                 logAgentInfo('Coverage')
                 script {
                     deleteDir()
@@ -533,6 +715,9 @@ pipeline {
             }
             post {
                 always {
+                    /*
+                     * Archivado de coverage outputs para evidencia y auditoria.
+                     */
                     archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
                 }
             }
@@ -541,6 +726,11 @@ pipeline {
 
     post {
         always {
+            /*
+             * Limpieza final:
+             * - Evita contaminacion entre builds (especialmente en Windows).
+             * - deleteDirs true para borrar subcarpetas generadas por herramientas/plugins.
+             */
             cleanWs(deleteDirs: true)
         }
     }

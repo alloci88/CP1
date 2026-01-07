@@ -146,6 +146,7 @@ def runBanditPylintStyle() {
         exit /b 0
     """.stripIndent())
 }
+
 def runJmeter() {
     runBat('JMeter', """
         @echo off
