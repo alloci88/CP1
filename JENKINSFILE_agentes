@@ -547,6 +547,7 @@ pipeline {
                                     node(env.STATIC_SECURITY_AGENT_LABEL) {
                                         stage('Static') {
                                             logAgentInfo('Static')
+											sleep(time: 10, unit: 'SECONDS')
                                             script {
                                                 deleteDir()
                                                 unstash 'SRC'
