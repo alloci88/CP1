@@ -622,115 +622,103 @@ pipeline {
 					}
 				}
 
-                stage('Rest + Performance') {
-                    /*
-                     * Branch que requiere levantar servicios y ejecutar pruebas de integracion y carga.
-                     * Se separa en otro agente para evitar pisar puertos y recursos del primary.
-                     *
-                     * Nota:
-                     * - Rest y Performance quedan SECUENCIALES para evitar colisiones de puertos/procesos
-                     *   (ambas stages arrancan Flask en el mismo agente/puerto).
-                     */
-                    agent { label "${QA_PERF_AGENT_LABEL}" }
-                    stages {
+                stage('Static + Security') {
+    /*
+     * Branch dedicado para analisis estatico y seguridad en un agente separado.
+     *
+     * IMPORTANTE (Reto 2 - executors):
+     * - Queremos que Static y Security se ejecuten "en paralelo" dentro del MISMO label (static-sec).
+     * - Para que el numero de executors tenga efecto visible, CADA rama debe reservar su propio executor
+     *   con node(label). Si no, ambas ramas comparten el mismo executor ya reservado por el stage.
+     *
+     * Con executors=1 en el/los nodo(s) con label static-sec:
+     * - Una de las ramas quedara en cola ("waiting for next available executor").
+     * Con executors>=2:
+     * - Ambas ramas podran ejecutarse realmente a la vez.
+     */
+    steps {
+        script {
+            parallel(
+                "Static": {
+                    node(env.STATIC_SECURITY_AGENT_LABEL) {
+                        stage('Static') {
+                            logAgentInfo('Static')
+                            script {
+                                deleteDir()
+                                unstash 'SRC'
+                                ensureReportsDirs()
 
-                        stage('Rest') {
-                            steps {
-                                logAgentInfo('Rest')
-                                script {
-                                    deleteDir()
-                                    unstash 'SRC'
-                                    ensureReportsDirs()
+                                /*
+                                 * Ejecuta flake8 en formato parseable.
+                                 * No falla por exit code; gate por conteo.
+                                 */
+                                runFlake8Pylint()
 
-                                    checkWiremockJar()
-                                    killByPort(env.FLASK_PORT)
-                                    killByPort(env.WIREMOCK_PORT)
-
-                                    startFlask()
-                                    startWiremock()
-
-                                    /*
-                                     * Espera a que ambos servicios respondan antes de lanzar tests REST.
-                                     */
-                                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask')
-                                    waitHttp200("http://127.0.0.1:${env.WIREMOCK_PORT}/__admin", 10, 2, 'Healthcheck Wiremock')
-
-                                    /*
-                                     * Ejecuta rest tests y conserva exit code,
-                                     * pero NO falla el stage por requisito del enunciado.
-                                     */
-                                    int rc = bat(returnStatus: true, label: 'Pytest Rest', script: """
-                                        @echo off
-                                        set PYTHONPATH=.
-                                        "${PYTHON_BIN}" -m pytest --junitxml=${REST_JUNIT} test\\rest
-                                        exit /b %ERRORLEVEL%
-                                    """.stripIndent())
-
-                                    echo "Rest exit code: ${rc} (stage stays green by requirement)"
-                                }
+                                int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
+                                applyCountQualityGate('Flake8', findings, 8, 10)
                             }
-                            post {
-                                always {
-                                    /*
-                                     * Limpieza obligatoria para no dejar procesos colgados en el agente.
-                                     */
-                                    script {
-                                        killByPort(env.FLASK_PORT)
-                                        killByPort(env.WIREMOCK_PORT)
-                                    }
-                                    junit testResults: "${REST_JUNIT}", allowEmptyResults: true, skipMarkingBuildUnstable: true
-                                }
+
+                            /*
+                             * Post de la stage Static (version scripted):
+                             * Mantiene Warnings-NG solo para graficas/historico y archiva evidencia.
+                             */
+                            catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                                recordIssues(
+                                    id: 'flake8',
+                                    enabledForFailure: true,
+                                    tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")]
+                                )
                             }
+
+                            archiveArtifacts artifacts: "${FLAKE8_REPORT}",
+                                             fingerprint: true,
+                                             allowEmptyArchive: true
                         }
+                    }
+                },
 
-                        stage('Performance') {
-                            steps {
-                                logAgentInfo('Performance')
-                                script {
-                                    deleteDir()
-                                    unstash 'SRC'
-                                    ensureReportsDirs()
+                "Security": {
+                    node(env.STATIC_SECURITY_AGENT_LABEL) {
+                        stage('Security') {
+                            logAgentInfo('Security')
+                            script {
+                                deleteDir()
+                                unstash 'SRC'
+                                ensureReportsDirs()
 
-                                    checkJmeterJar()
+                                /*
+                                 * Bandit genera:
+                                 * - OUT para Warnings-NG
+                                 * - JSON para conteo determinista
+                                 */
+                                runBanditPylintStyle()
 
-                                    killByPort(env.FLASK_PORT)
-                                    startFlask()
-                                    waitHttp200("http://127.0.0.1:${env.FLASK_PORT}/", 10, 2, 'Healthcheck Flask (Perf)')
-
-                                    /*
-                                     * Performance se marca en rojo si falla JMeter,
-                                     * pero no aborta el pipeline completo.
-                                     */
-                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                                        runJmeter()
-                                    }
-                                }
+                                int findings = countBanditFindingsFromJson(env.BANDIT_JSON)
+                                applyCountQualityGate('Bandit', findings, 2, 4)
                             }
-                            post {
-                                always {
-                                    script { killByPort(env.FLASK_PORT) }
 
-                                    /*
-                                     * Publicacion del reporte JMeter para graficas/historico.
-                                     * Umbrales:
-                                     * - >=1% errors => UNSTABLE
-                                     * - >=5% errors => FAILURE
-                                     */
-                                    perfReport(
-                                        sourceDataFiles: "${JMETER_JTL}",
-                                        errorUnstableThreshold: 1,
-                                        errorFailedThreshold: 5,
-                                        percentiles: '0,50,90,95,100'
-                                    )
-
-                                    archiveArtifacts artifacts: "${JMETER_JTL}", fingerprint: true, allowEmptyArchive: true
-                                }
+                            /*
+                             * Post de la stage Security (version scripted)
+                             */
+                            catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                                recordIssues(
+                                    id: 'bandit',
+                                    enabledForFailure: true,
+                                    tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")]
+                                )
                             }
+
+                            archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}",
+                                             fingerprint: true,
+                                             allowEmptyArchive: true
                         }
                     }
                 }
-            }
+            )
         }
+    }
+}
+
 
         stage('Coverage') {
             /*
