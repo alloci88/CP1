@@ -12,7 +12,9 @@
  *   pero los quality gates son deterministas y se aplican por conteo.
  * - Log de identidad del agente (whoami/hostname/workspace) en cada etapa.
  *
- * NOTE: ASCII only to avoid encoding issues in Jenkins on Windows.
+ * Nota Windows:
+ * - ASCII only para evitar problemas de encoding en Jenkins/Windows.
+ * - Uso de venv via PYTHON_BIN para que el pipeline no dependa del PATH del servicio (SYSTEM).
  */
 
 /* =========================
