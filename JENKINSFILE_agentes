@@ -15,6 +15,12 @@
  * Nota Windows:
  * - ASCII only para evitar problemas de encoding en Jenkins/Windows.
  * - Uso de venv via PYTHON_BIN para que el pipeline no dependa del PATH del servicio (SYSTEM).
+ *
+ * Nota Reto 2 (executors=1):
+ * - Para que se vea el efecto de bajar executors a 1, en este Jenkinsfile se ejecutan
+ *   Static y Security EN PARALELO dentro del MISMO agente (static-sec). Con executors=1,
+ *   una de las dos stages quedara en cola ("waiting for next available executor") y se vera
+ *   claramente en el log. Con executors>=2, ambas pueden correr realmente a la vez.
  */
 
 /* =========================
@@ -523,10 +529,14 @@ pipeline {
                 stage('Static + Security') {
                     /*
                      * Branch dedicado para analisis estatico y seguridad en un agente separado.
-                     * Esto acelera y aisla dependencias (tools/py env) si fuera necesario.
+                     *
+                     * IMPORTANTE (Reto 2 - executors):
+                     * - Aqui Static y Security se ejecutan EN PARALELO dentro del MISMO agente.
+                     * - Si el agente tiene 1 executor, una rama quedara en cola y se vera en el log.
                      */
                     agent { label "${STATIC_SECURITY_AGENT_LABEL}" }
-                    stages {
+
+                    parallel {
 
                         stage('Static') {
                             steps {
@@ -609,6 +619,10 @@ pipeline {
                     /*
                      * Branch que requiere levantar servicios y ejecutar pruebas de integracion y carga.
                      * Se separa en otro agente para evitar pisar puertos y recursos del primary.
+                     *
+                     * Nota:
+                     * - Rest y Performance quedan SECUENCIALES para evitar colisiones de puertos/procesos
+                     *   (ambas stages arrancan Flask en el mismo agente/puerto).
                      */
                     agent { label "${QA_PERF_AGENT_LABEL}" }
                     stages {
