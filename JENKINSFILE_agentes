@@ -531,86 +531,92 @@ pipeline {
                      * Branch dedicado para analisis estatico y seguridad en un agente separado.
                      *
                      * IMPORTANTE (Reto 2 - executors):
-                     * - Aqui Static y Security se ejecutan EN PARALELO dentro del MISMO agente.
-                     * - Si el agente tiene 1 executor, una rama quedara en cola y se vera en el log.
+                     * - Queremos que Static y Security se ejecuten "en paralelo" dentro del MISMO agente.
+                     * - Declarative NO permite anidar "parallel { }" dentro de otro "parallel { }".
+                     * - Solucion: usar "script { parallel(...) }" (scripted step) dentro de esta stage.
+                     *
+                     * Con executors=1 en el agente static-sec:
+                     * - Una de las ramas quedara en cola ("waiting for next available executor").
+                     * Con executors>=2:
+                     * - Ambas ramas podran ejecutarse de verdad a la vez.
                      */
                     agent { label "${STATIC_SECURITY_AGENT_LABEL}" }
 
-                    parallel {
+                    steps {
+                        script {
+                            parallel(
+                                "Static": {
+                                    stage('Static') {
+                                        logAgentInfo('Static')
+                                        script {
+                                            deleteDir()
+                                            unstash 'SRC'
+                                            ensureReportsDirs()
 
-                        stage('Static') {
-                            steps {
-                                logAgentInfo('Static')
-                                script {
-                                    deleteDir()
-                                    unstash 'SRC'
-                                    ensureReportsDirs()
+                                            /*
+                                             * Ejecuta flake8 en formato parseable.
+                                             * No falla por exit code; gate por conteo.
+                                             */
+                                            runFlake8Pylint()
 
-                                    /*
-                                     * Ejecuta flake8 en formato parseable.
-                                     * No falla por exit code; gate por conteo.
-                                     */
-                                    runFlake8Pylint()
+                                            int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
+                                            applyCountQualityGate('Flake8', findings, 8, 10)
+                                        }
 
-                                    int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
-                                    applyCountQualityGate('Flake8', findings, 8, 10)
-                                }
-                            }
-                            post {
-                                always {
-                                    /*
-                                     * Warnings-NG solo para graficas/historico:
-                                     * no usamos qualityGates del plugin para mantener determinismo.
-                                     */
-                                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                                        recordIssues(
-                                            id: 'flake8',
-                                            enabledForFailure: true,
-                                            tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")]
-                                        )
+                                        /*
+                                         * Post de la stage Static (version scripted):
+                                         * Mantiene Warnings-NG solo para graficas/historico y archiva evidencia.
+                                         */
+                                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                                            recordIssues(
+                                                id: 'flake8',
+                                                enabledForFailure: true,
+                                                tools: [pyLint(name: 'Flake8', pattern: "${FLAKE8_REPORT}")]
+                                            )
+                                        }
+
+                                        archiveArtifacts artifacts: "${FLAKE8_REPORT}",
+                                                         fingerprint: true,
+                                                         allowEmptyArchive: true
                                     }
+                                },
 
-                                    archiveArtifacts artifacts: "${FLAKE8_REPORT}",
-                                                     fingerprint: true,
-                                                     allowEmptyArchive: true
-                                }
-                            }
-                        }
+                                "Security": {
+                                    stage('Security') {
+                                        logAgentInfo('Security')
+                                        script {
+                                            deleteDir()
+                                            unstash 'SRC'
+                                            ensureReportsDirs()
 
-                        stage('Security') {
-                            steps {
-                                logAgentInfo('Security')
-                                script {
-                                    deleteDir()
-                                    unstash 'SRC'
-                                    ensureReportsDirs()
+                                            /*
+                                             * Bandit genera:
+                                             * - OUT para Warnings-NG
+                                             * - JSON para conteo determinista
+                                             */
+                                            runBanditPylintStyle()
 
-                                    /*
-                                     * Bandit genera:
-                                     * - OUT para Warnings-NG
-                                     * - JSON para conteo determinista
-                                     */
-                                    runBanditPylintStyle()
+                                            int findings = countBanditFindingsFromJson(env.BANDIT_JSON)
+                                            applyCountQualityGate('Bandit', findings, 2, 4)
+                                        }
 
-                                    int findings = countBanditFindingsFromJson(env.BANDIT_JSON)
-                                    applyCountQualityGate('Bandit', findings, 2, 4)
-                                }
-                            }
-                            post {
-                                always {
-                                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                                        recordIssues(
-                                            id: 'bandit',
-                                            enabledForFailure: true,
-                                            tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")]
-                                        )
+                                        /*
+                                         * Post de la stage Security (version scripted)
+                                         */
+                                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                                            recordIssues(
+                                                id: 'bandit',
+                                                enabledForFailure: true,
+                                                tools: [pyLint(name: 'Bandit', pattern: "${BANDIT_OUT}")]
+                                            )
+                                        }
+
+                                        archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}",
+                                                         fingerprint: true,
+                                                         allowEmptyArchive: true
                                     }
-
-                                    archiveArtifacts artifacts: "${BANDIT_OUT},${BANDIT_JSON}",
-                                                     fingerprint: true,
-                                                     allowEmptyArchive: true
                                 }
-                            }
+                            )
                         }
                     }
                 }
