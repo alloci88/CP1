@@ -670,10 +670,9 @@ pipeline {
                 }
             }
         }
-
-        stage('Coverage') {
-            steps {
-                /*
+		stage('Coverage') {
+			steps {
+			  /*
                  * Coverage:
                  * - No re-ejecuta pytest.
                  * - Lee coverage.json generado en Unit (stash REPORTS).
@@ -682,47 +681,46 @@ pipeline {
                  *   Ramas:  80-90 UNSTABLE, <80 FAILURE.
                  * - Marca stage/build pero NO detiene pipeline.
                  */
-                logAgentInfo('Coverage')
-                script {
-                    deleteDir()
-                    unstash 'REPORTS'
-                    ensureReportsDirs()
-
-                    def (double linesPct, double branchesPct) = readCoveragePercents()
-                    echo "Coverage lines: ${linesPct}%"
-                    echo "Coverage branches: ${branchesPct}%"
-
-                    boolean linesUnstable = (linesPct >= 85.0 && linesPct <= 95.0)
-                    boolean linesFail = (linesPct < 85.0)
-
-                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct <= 90.0)
-                    boolean branchesFail = (branchesPct < 80.0)
-
-                    if (linesFail || branchesFail) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
-                        }
-                        setBuildResultWorst('FAILURE')
-                    } else if (linesUnstable || branchesUnstable) {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
-                        }
-                        setBuildResultWorst('UNSTABLE')
-                    } else {
-                        echo "Coverage OK"
-                    }
-                }
-            }
-            post {
-                always {
-                    /*
+				logAgentInfo('Coverage')
+				script {
+					deleteDir()
+					unstash 'REPORTS'
+					ensureReportsDirs()
+		
+					def (double linesPct, double branchesPct) = readCoveragePercents()
+					echo "Coverage lines: ${linesPct}%"
+					echo "Coverage branches: ${branchesPct}%"
+		
+					boolean linesUnstable = (linesPct >= 85.0 && linesPct < 95.0)
+					boolean linesFail = (linesPct < 85.0)
+		
+					boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct < 90.0)
+					boolean branchesFail = (branchesPct < 80.0)
+		
+					if (linesFail || branchesFail) {
+						catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+							error("Coverage unhealthy (lines=${linesPct}%, branches=${branchesPct}%)")
+						}
+						setBuildResultWorst('FAILURE')
+					} else if (linesUnstable || branchesUnstable) {
+						catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+							error("Coverage unstable (lines=${linesPct}%, branches=${branchesPct}%)")
+						}
+						setBuildResultWorst('UNSTABLE')
+					} else {
+						echo "Coverage OK"
+					}
+				}
+			}
+			post {
+				always {
+					/*
                      * Archivado de coverage outputs para evidencia y auditoria.
                      */
-                    archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
-                }
-            }
-        }
-    }
+					archiveArtifacts artifacts: "${COVERAGE_XML},${COVERAGE_JSON}", fingerprint: true, allowEmptyArchive: true
+				}
+			}
+		}
 
     post {
         always {
