@@ -183,7 +183,19 @@ def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py --exit-zero --format=pylint > "%FLAKE8_REPORT%"
+
+        rem 1) Report for Warnings-NG (Pylint parser expects this)
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py ^
+            --exit-zero ^
+            --format=pylint ^
+            > "%FLAKE8_REPORT%"
+
+        rem 2) Report for deterministic gate counting (parser-independent)
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py ^
+            --exit-zero ^
+            --format="%(path)s:%(row)d:%(col)d: %(code)s %(text)s" ^
+            > "%FLAKE8_GATE_REPORT%"
+
         exit /b 0
     """.stripIndent())
 }
@@ -310,7 +322,7 @@ def applyCountQualityGate(String stageLabel, int findings, int unstableFrom, int
 }
 
 /*
- * Coverage read (NO re-running unit tests allowed).
+ * Lectura de los datos de Coverage.
  * Lee percent de lineas y ramas desde coverage.json generado en Unit stage.
  * Esto permite una stage Coverage separada y determinista sin re-ejecutar pytest.
  */
@@ -402,6 +414,7 @@ pipeline {
 
         // Flake8 en formato pylint-like
         FLAKE8_REPORT = 'reports\\static\\flake8.out'
+		FLAKE8_GATE_REPORT = 'reports\\static\\flake8.gate.out'
 
         // Bandit: salida parseable + JSON para conteo
         BANDIT_OUT = 'reports\\security\\bandit.out'
@@ -559,7 +572,7 @@ pipeline {
                                                  */
                                                 runFlake8Pylint()
 
-                                                int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
+                                                int findings = countPylintLikeFindings(env.FLAKE8_GATE_REPORT)
                                                 applyCountQualityGate('Flake8', findings, 8, 10)
                                             }
 
@@ -575,9 +588,9 @@ pipeline {
                                                 )
                                             }
 
-                                            archiveArtifacts artifacts: "${FLAKE8_REPORT}",
-                                                             fingerprint: true,
-                                                             allowEmptyArchive: true
+                                            archiveArtifacts artifacts: "${FLAKE8_REPORT},${FLAKE8_GATE_REPORT}",
+											fingerprint: true,
+											allowEmptyArchive: true
                                         }
                                     }
                                 },
@@ -757,10 +770,10 @@ pipeline {
                      * - Lines:   <85 FAIL, 85..95 UNSTABLE, >95 OK
                      * - Branches:<80 FAIL, 80..90 UNSTABLE, >90 OK
                      */
-                    boolean linesUnstable = (linesPct >= 85.0 && linesPct <= 95.0)
+                    boolean linesUnstable = (linesPct >= 85.0 && linesPct < 95.0)
                     boolean linesFail = (linesPct < 85.0)
 
-                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct <= 90.0)
+                    boolean branchesUnstable = (branchesPct >= 80.0 && branchesPct < 90.0)
                     boolean branchesFail = (branchesPct < 80.0)
 
                     if (linesFail || branchesFail) {
