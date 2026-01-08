@@ -176,10 +176,11 @@ def runFlake8Pylint() {
         @echo off
         set PYTHONPATH=.
 
-        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py ^
-            --exit-zero ^
-            --format="%(path)s:%(row)d:%(col)d: %(code)s %(text)s" ^
-            > "%FLAKE8_REPORT%"
+        rem 1) Report for Warnings-NG (needs real pylint format)
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py --exit-zero --format=pylint > "%FLAKE8_REPORT%"
+
+        rem 2) Report for deterministic gate counting (1 line = 1 finding, stable)
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py --exit-zero --format="%(path)s:%(row)d:%(col)d: %(code)s %(text)s" > "%FLAKE8_GATE_REPORT%"
 
         exit /b 0
     """.stripIndent())
@@ -396,6 +397,7 @@ pipeline {
          * Outputs static/security para Warnings-NG y gates.
          */
         FLAKE8_REPORT = 'reports\\static\\flake8.out'
+		FLAKE8_GATE_REPORT = 'reports\\static\\flake8.gate.out'
         BANDIT_OUT = 'reports\\security\\bandit.out'
         BANDIT_JSON = 'reports\\security\\bandit.json'
 
@@ -567,7 +569,7 @@ pipeline {
 
                     runFlake8Pylint()
 
-                    int findings = countPylintLikeFindings(env.FLAKE8_REPORT)
+                    int findings = countPylintLikeFindings(env.FLAKE8_GATE_REPORT)
                     applyCountQualityGate('Flake8', findings, 8, 10)
                 }
             }
