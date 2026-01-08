@@ -169,14 +169,18 @@ def startWiremock() {
 /*
  * Flake8:
  * - --exit-zero para que flake8 NO decida el resultado Jenkins.
- * - --format=pylint para que Warnings-NG (parser pyLint) lo pueda graficar.
  * - Gate real se aplica despues por conteo de hallazgos (enunciado).
  */
 def runFlake8Pylint() {
     runBat('Flake8', """
         @echo off
         set PYTHONPATH=.
-        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py --exit-zero --format=pylint > "%FLAKE8_REPORT%"
+
+        "%PYTHON_BIN%" -m flake8 app\\api.py app\\calc.py ^
+            --exit-zero ^
+            --format="%(path)s:%(row)d:%(col)d: %(code)s %(text)s" ^
+            > "%FLAKE8_REPORT%"
+
         exit /b 0
     """.stripIndent())
 }
