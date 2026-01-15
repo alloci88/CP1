@@ -419,38 +419,34 @@ pipeline {
 
         /*
          * SCM:
-         * - repo y branch objetivo.
+         * - repo objetivo.
          */
         REPO_URL = 'https://github.com/alloci88/CP1.git'
-        REPO_BRANCH = '*/master'
     }
 
     stages {
 
         stage('Get Code') {
-            steps {
-                /*
-                 * Checkout controlado + stash del codigo:
-                 * - stash/unstash se usa incluso en agente unico para mantener compatibilidad con JENKINSFILE_agentes.
-                 * - Excluimos reports/coverage/__pycache__ para no arrastrar artefactos de builds previos.
-                 */
-                logAgentInfo('Get Code')
-
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: "${REPO_BRANCH}"]],
-                    userRemoteConfigs: [[url: "${REPO_URL}"]]
-                ])
-
-                prepWorkspaceVerbose()
-                ensureReportsDirs()
-
-                stash name: 'SRC',
-                      includes: '**/*',
-                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
-                      useDefaultExcludes: false
-            }
-        }
+			steps {
+				/*
+				* Checkout controlado + stash del codigo:
+				* - Usamos "checkout scm" para respetar la rama configurada en el job.
+				* - stash/unstash se usa incluso en agente unico para mantener compatibilidad con JENKINSFILE_agentes.
+				* - Excluimos reports/coverage/__pycache__ para no arrastrar artefactos de builds previos.
+				*/
+				logAgentInfo('Get Code')
+		
+				checkout scm
+		
+				prepWorkspaceVerbose()
+				ensureReportsDirs()
+		
+				stash name: 'SRC',
+					includes: '**/*',
+					excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
+					useDefaultExcludes: false
+			}
+		}
 
         stage('Unit') {
             steps {
@@ -588,7 +584,9 @@ pipeline {
                         )
                     }
 
-                    archiveArtifacts artifacts: "${FLAKE8_REPORT}", fingerprint: true, allowEmptyArchive: true
+                        archiveArtifacts artifacts: "${FLAKE8_REPORT},${FLAKE8_GATE_REPORT}",
+						fingerprint: true,
+						allowEmptyArchive: true
                 }
             }
         }
