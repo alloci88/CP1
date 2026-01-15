@@ -433,39 +433,32 @@ pipeline {
 
         // Repo origen (sin credenciales por ser publico en esta practica)
         REPO_URL = 'https://github.com/alloci88/CP1.git'
-        REPO_BRANCH = '*/master'
     }
 
     stages {
 
-        stage('Get Code') {
-            /*
-             * Checkout y stash SOLO una vez en el agente "primary".
-             * Esto es el "origen de verdad" del workspace para el resto de stages.
-             */
-            agent { label "${PRIMARY_AGENT_LABEL}" }
-            steps {
-                logAgentInfo('Get Code')
+       stage('Get Code') {
+			steps {
+				/*
+				* Checkout controlado + stash del codigo:
+				* - Usamos "checkout scm" para respetar la rama configurada en el job.
+				* - stash/unstash se usa incluso en agente unico para mantener compatibilidad con JENKINSFILE_agentes.
+				* - Excluimos reports/coverage/__pycache__ para no arrastrar artefactos de builds previos.
+				*/
+				logAgentInfo('Get Code')
+		
+				checkout scm
+		
+				prepWorkspaceVerbose()
+				ensureReportsDirs()
+		
+				stash name: 'SRC',
+					includes: '**/*',
+					excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
+					useDefaultExcludes: false
+			}
+		}
 
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: "${REPO_BRANCH}"]],
-                    userRemoteConfigs: [[url: "${REPO_URL}"]]
-                ])
-
-                prepWorkspaceVerbose()
-                ensureReportsDirs()
-
-                /*
-                 * stash 'SRC' distribuye el codigo a los demas agentes.
-                 * excluimos reports/coverage/__pycache__ para no arrastrar basura.
-                 */
-                stash name: 'SRC',
-                      includes: '**/*',
-                      excludes: '.git/**,reports/**,coverage/**,**/__pycache__/**',
-                      useDefaultExcludes: false
-            }
-        }
 
         stage('Parallel QA') {
             /*
